@@ -1,0 +1,69 @@
+# LED Sign: 3x 64x64 P3 panels (192x64) on an Adafruit Matrix Portal S3.
+# The Matrix Portal plugs straight into panel 1's IN connector (no jumpers).
+# Chain: panel 1 OUT -> panel 2 IN -> panel 2 OUT -> panel 3 IN (ribbon cables).
+# Panels get 5V from the MEAN WELL through their own red/black leads.
+#
+# 64x64 panels need the E line: bridge the Matrix Portal's "Address E" solder
+# jumper (middle pad to the pad marked 8). The board preset already maps E.
+#
+# Paste into a new ESPHome device. Keep the api:/ota: blocks (encryption key,
+# password) that the ESPHome dashboard generated for this device.
+#
+# Expected: white border around all 3 panels, a big "1", "2", "3" from left
+# to right, and red/green/blue bars at the top and bottom of every panel.
+
+esphome:
+  name: led-sign
+  friendly_name: LED Sign
+
+esp32:
+  board: adafruit_matrixportal_esp32s3
+
+psram:
+  mode: quad
+
+logger:
+
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+font:
+  - file: "gfonts://Silkscreen"
+    id: f8
+    size: 8
+  - file: "gfonts://Silkscreen"
+    id: f32
+    size: 32
+
+display:
+  - platform: hub75
+    id: sign
+    board: adafruit-matrix-portal-s3
+    panel_width: 64
+    panel_height: 64
+    layout_cols: 3
+    layout: HORIZONTAL
+    bit_depth: 8
+    brightness: 60
+    double_buffer: true
+    # Panels use FM6124 driver chips. If they stay dark, uncomment:
+    # shift_driver: FM6124
+    lambda: |-
+      for (int p = 0; p < 3; p++) {
+        int x = p * 64;
+        // Top half uses R1/G1/B1, bottom half uses R2/G2/B2.
+        it.filled_rectangle(x, 0, 21, 8, Color(255, 0, 0));
+        it.filled_rectangle(x + 21, 0, 22, 8, Color(0, 255, 0));
+        it.filled_rectangle(x + 43, 0, 21, 8, Color(0, 0, 255));
+        it.filled_rectangle(x, 56, 21, 8, Color(255, 0, 0));
+        it.filled_rectangle(x + 21, 56, 22, 8, Color(0, 255, 0));
+        it.filled_rectangle(x + 43, 56, 21, 8, Color(0, 0, 255));
+        it.printf(x + 32, 32, id(f32), Color(255, 176, 60), TextAlign::CENTER, "%d", p + 1);
+      }
+      it.rectangle(0, 0, 192, 64, Color(255, 255, 255));
