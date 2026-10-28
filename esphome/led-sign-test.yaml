@@ -1,0 +1,73 @@
+# LED Sign: single 64x64 P3 panel wiring test (ESP-WROOM-32 DevKit).
+# Paste into a new ESPHome device. Keep the api:/ota: blocks (encryption key,
+# password) that the ESPHome dashboard generated for this device.
+#
+# Ribbon (brown = wire 1, on the R1/G1 end of the panel's IN socket):
+#   1 brown  R1  -> D25      9 white    LA  -> D23
+#   2 red    G1  -> D26     10 black    LB  -> D19
+#   3 orange B1  -> D27     11 brown2   LC  -> D5
+#   4 yellow GND -> GND     12 red2     LD  -> TX2 (GPIO17)
+#   5 green  R2  -> D21     13 orange2  CLK -> RX2 (GPIO16)
+#   6 blue   G2  -> D22     14 yellow2  LAT -> D4
+#   7 purple B2  -> D32     15 green2   OE  -> D15  (printed "CE")
+#   8 gray   E   -> D18     16 blue2    GND -> GND
+#
+# Expected: RGB bars top and bottom, "TOP"/"BOTTOM" in amber, white border.
+
+esphome:
+  name: led-sign
+  friendly_name: LED Sign
+
+esp32:
+  board: esp32dev
+
+logger:
+
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+font:
+  - file: "gfonts://Silkscreen"
+    id: f8
+    size: 8
+
+display:
+  - platform: hub75
+    id: sign
+    panel_width: 64
+    panel_height: 64
+    r1_pin: GPIO25
+    g1_pin: GPIO26
+    b1_pin: GPIO27
+    r2_pin: GPIO21
+    g2_pin: GPIO22
+    b2_pin: GPIO32
+    a_pin: GPIO23
+    b_pin: GPIO19
+    c_pin: GPIO5
+    d_pin: GPIO17
+    e_pin: GPIO18
+    lat_pin: GPIO4
+    oe_pin: GPIO15
+    clk_pin: GPIO16
+    bit_depth: 6
+    brightness: 60
+    # Panel uses FM6124 driver chips. If it stays dark, uncomment:
+    # shift_driver: FM6124
+    lambda: |-
+      // Top half (rows 0-31) uses R1/G1/B1, bottom half (32-63) uses R2/G2/B2.
+      it.filled_rectangle(0, 0, 21, 14, Color(255, 0, 0));
+      it.filled_rectangle(21, 0, 22, 14, Color(0, 255, 0));
+      it.filled_rectangle(43, 0, 21, 14, Color(0, 0, 255));
+      it.filled_rectangle(0, 50, 21, 14, Color(255, 0, 0));
+      it.filled_rectangle(21, 50, 22, 14, Color(0, 255, 0));
+      it.filled_rectangle(43, 50, 21, 14, Color(0, 0, 255));
+      it.rectangle(0, 0, 64, 64, Color(255, 255, 255));
+      it.print(32, 18, id(f8), Color(255, 176, 60), TextAlign::TOP_CENTER, "TOP");
+      it.print(32, 38, id(f8), Color(255, 176, 60), TextAlign::TOP_CENTER, "BOTTOM");
