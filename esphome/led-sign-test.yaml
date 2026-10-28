@@ -58,6 +58,8 @@ display:
     clk_pin: GPIO16
     bit_depth: 6
     brightness: 60
+    # Draw off-screen and swap, so the once-a-second redraw doesn't blink.
+    double_buffer: true
     # Panel uses FM6124 driver chips. If it stays dark, uncomment:
     # shift_driver: FM6124
     lambda: |-
