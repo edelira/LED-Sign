@@ -58,3 +58,23 @@ done
 - Put two screws in the wall, level, 379 mm apart, leaving the heads 3–4 mm proud.
 - Hook the sign on and slide it down. The top of the sign ends up about 6 mm (¼")
   above the screws.
+
+## Magnetic-screw wall rail (`magnet_rail.scad`)
+A simpler way to hang the panels: screw a rail to the wall and drop the
+panels' own magnetic screws into it.
+
+- `stl/magnet_rail.stl`: one per panel (192 mm long). Butt them end to end, with
+  filament pins in the end holes to line them up. Print standing on its flat bottom,
+  no supports.
+- `stl/magnet_foot.stl`: one per **bottom** magnetic screw. Holds the bottom of the
+  panel off the wall by the same amount as the rail does at the top.
+- `stl/magnet_test.stl`: a 40 mm test piece. Print it first and check that a magnet
+  drops in and holds.
+
+How it works: the magnets on the panels' **top** screws drop into the open channel
+and rest on its floor; the front lip catches the lower part of each magnet. The
+channel is open along its whole length, so screw spacing doesn't matter. Lift
+the sign a few millimetres to take it down.
+
+Measure one magnetic screw and set `magnet_d`, `magnet_h`, `shaft_d` and
+`shaft_gap` at the top of the file before printing the full rails.
