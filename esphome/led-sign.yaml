@@ -9,12 +9,18 @@
 #   esphome.led_sign_show_message  line1, line2, seconds
 #   esphome.led_sign_show_timer    label, remaining, duration   (seconds)
 #   esphome.led_sign_clear_timer
-# Screen priority: timer > message > idle (clock + weather).
+# Screen priority: timer > message > plane overhead > idle (clock + weather).
+#
+# Planes: the sign polls adsb.lol (free, no key) every 10 s for aircraft near
+# home_lat/home_lon, picks the closest one inside the radius/altitude limits
+# (adjustable in HA) and looks up its route on adsbdb.com.
 
 substitutions:
   panels: "2"          # change to "3" when the third panel is connected
   latitude: "41.83"    # weather location (city level is enough)
   longitude: "-87.81"
+  home_lat: "41.83"    # exact home position for "overhead" (set precisely in ESPHome)
+  home_lon: "-87.81"
 
 esphome:
   name: led-sign
@@ -114,6 +120,42 @@ globals:
   - id: timer_duration
     type: int
     initial_value: '0'
+  # Closest qualifying aircraft
+  - id: pl_flight
+    type: std::string
+  - id: pl_type
+    type: std::string
+  - id: pl_reg
+    type: std::string
+  - id: pl_alt
+    type: int
+    initial_value: '0'
+  - id: pl_rate
+    type: int
+    initial_value: '0'
+  - id: pl_gs
+    type: float
+    initial_value: '0'
+  - id: pl_track
+    type: float
+    initial_value: '0'
+  - id: pl_dx          # miles east of home
+    type: float
+    initial_value: '0'
+  - id: pl_dy          # miles north of home
+    type: float
+    initial_value: '0'
+  - id: pl_last_seen
+    type: int64_t
+    initial_value: '0'
+  - id: pl_trail
+    type: std::vector<std::pair<float, float>>
+  - id: pl_route
+    type: std::string
+  - id: pl_airline
+    type: std::string
+  - id: pl_route_for
+    type: std::string
 
 script:
   - id: fetch_weather
@@ -145,10 +187,116 @@ script:
             then:
               - logger.log: "Weather request failed"
 
+  - id: fetch_planes
+    mode: single
+    then:
+      - http_request.get:
+          url: !lambda |-
+            // adsb.lol takes the radius in nautical miles; ask a bit wider than the limit.
+            char url[128];
+            snprintf(url, sizeof(url), "https://api.adsb.lol/v2/point/%s/%s/%.1f",
+                     "${home_lat}", "${home_lon}", id(plane_radius).state * 0.869f + 1.0f);
+            return std::string(url);
+          capture_response: true
+          max_response_buffer_size: 32768
+          on_response:
+            then:
+              - if:
+                  condition:
+                    lambda: 'return response->status_code == 200;'
+                  then:
+                    - lambda: |-
+                        const float hlat = ${home_lat}, hlon = ${home_lon};
+                        const float kx = 69.17f * cosf(hlat * M_PI / 180.0f), ky = 69.05f;
+                        const float radius = id(plane_radius).state;
+                        const int max_alt = (int) id(plane_max_alt).state;
+                        json::parse_json(body, [&](JsonObject root) -> bool {
+                          float best = 1e9;
+                          JsonObject pick;
+                          for (JsonObject a : root["ac"].as<JsonArray>()) {
+                            if (!a["lat"].is<float>() || !a["alt_baro"].is<int>()) continue;  // "ground" is a string
+                            int alt = a["alt_baro"].as<int>();
+                            if (alt > max_alt) continue;
+                            float dx = (a["lon"].as<float>() - hlon) * kx;
+                            float dy = (a["lat"].as<float>() - hlat) * ky;
+                            float d = sqrtf(dx * dx + dy * dy);
+                            if (d <= radius && d < best) { best = d; pick = a; }
+                          }
+                          if (pick.isNull()) return true;
+                          std::string flight = pick["flight"] | "";
+                          while (!flight.empty() && flight.back() == ' ') flight.pop_back();
+                          std::string reg = pick["r"] | "";
+                          if (flight.empty()) flight = reg.empty() ? std::string(pick["hex"] | "?") : reg;
+                          if (flight != id(pl_flight)) {
+                            id(pl_trail).clear();
+                            id(pl_route).clear();
+                            id(pl_airline).clear();
+                            id(overhead_flight).publish_state(flight);
+                          }
+                          id(pl_flight) = flight;
+                          id(pl_reg) = reg;
+                          id(pl_type) = pick["t"] | "";
+                          id(pl_alt) = pick["alt_baro"].as<int>();
+                          id(pl_rate) = pick["baro_rate"] | 0;
+                          id(pl_gs) = pick["gs"] | 0.0f;
+                          id(pl_track) = pick["track"] | 0.0f;
+                          id(pl_dx) = (pick["lon"].as<float>() - hlon) * kx;
+                          id(pl_dy) = (pick["lat"].as<float>() - hlat) * ky;
+                          id(pl_trail).push_back({id(pl_dx), id(pl_dy)});
+                          if (id(pl_trail).size() > 8) id(pl_trail).erase(id(pl_trail).begin());
+                          id(pl_last_seen) = id(sntp_time).now().timestamp;
+                          return true;
+                        });
+                        if (id(pl_route_for) != id(pl_flight) && !id(pl_flight).empty())
+                          id(fetch_route).execute();
+          on_error:
+            then:
+              - logger.log: "Plane request failed"
+
+  - id: fetch_route
+    mode: single
+    then:
+      - lambda: 'id(pl_route_for) = id(pl_flight);'
+      - delay: 200ms   # let the plane request finish before starting the next one
+      - http_request.get:
+          url: !lambda 'return "https://api.adsbdb.com/v0/callsign/" + id(pl_route_for);'
+          capture_response: true
+          max_response_buffer_size: 8192
+          on_response:
+            then:
+              - lambda: |-
+                  if (response->status_code != 200) return;
+                  json::parse_json(body, [](JsonObject root) -> bool {
+                    JsonObject fr = root["response"]["flightroute"];
+                    if (fr.isNull()) return true;
+                    std::string from = fr["origin"]["iata_code"] | "";
+                    std::string to = fr["destination"]["iata_code"] | "";
+                    if (!from.empty() && !to.empty()) id(pl_route) = from + " > " + to;
+                    std::string airline = fr["airline"]["name"] | "";
+                    if (airline.size() > 18) airline.resize(18);
+                    id(pl_airline) = airline;
+                    return true;
+                  });
+
 interval:
   - interval: 15min
     then:
       - script.execute: fetch_weather
+  - interval: 10s
+    then:
+      - if:
+          condition:
+            switch.is_on: show_planes
+          then:
+            - script.execute: fetch_planes
+      - lambda: |-
+          // Forget the plane 20 s after it was last inside the limits.
+          if (id(pl_last_seen) > 0 && id(sntp_time).now().timestamp - id(pl_last_seen) > 20) {
+            id(pl_last_seen) = 0;
+            id(pl_flight).clear();
+            id(pl_route_for).clear();
+            id(overhead_flight).publish_state("none");
+          }
 
 switch:
   - platform: template
@@ -165,6 +313,12 @@ switch:
       - hub75.set_brightness:
           id: sign
           brightness: 0
+  - platform: template
+    name: "Show planes"
+    id: show_planes
+    icon: mdi:airplane
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
 
 number:
   - platform: template
@@ -186,6 +340,34 @@ number:
             - hub75.set_brightness:
                 id: sign
                 brightness: !lambda 'return (int) (x * 255 / 100);'
+  - platform: template
+    name: "Plane radius"
+    id: plane_radius
+    icon: mdi:radius-outline
+    unit_of_measurement: "mi"
+    min_value: 0.25
+    max_value: 5
+    step: 0.25
+    optimistic: true
+    restore_value: true
+    initial_value: 1.5
+  - platform: template
+    name: "Plane max altitude"
+    id: plane_max_alt
+    icon: mdi:airplane-marker
+    unit_of_measurement: "ft"
+    min_value: 1000
+    max_value: 40000
+    step: 500
+    optimistic: true
+    restore_value: true
+    initial_value: 10000
+
+text_sensor:
+  - platform: template
+    name: "Overhead flight"
+    id: overhead_flight
+    icon: mdi:airplane
 
 font:
   - file: "gfonts://Silkscreen"
@@ -219,6 +401,10 @@ color:
     red_int: 70
     green_int: 70
     blue_int: 70
+  - id: c_cyan
+    red_int: 60
+    green_int: 200
+    blue_int: 255
 
 display:
   - platform: hub75
@@ -276,6 +462,42 @@ display:
       if (id(msg_until) > ts) {
         it.print(W / 2, 22, id(f16), id(c_amber), TextAlign::CENTER, id(msg_line1).c_str());
         it.print(W / 2, 46, id(f8), id(c_white), TextAlign::CENTER, id(msg_line2).c_str());
+        return;
+      }
+
+      // ---- Plane overhead ----
+      if (id(pl_last_seen) > 0 && !id(pl_flight).empty()) {
+        const bool radar = W >= 192;
+        const int x0 = radar ? 70 : 2, xr = W - 2;
+        if (radar) {
+          const int cx = 31, cy = 31;
+          const float scale = 30.0f / id(plane_radius).state;
+          Color ring(0, 70, 30);
+          for (int r = 10; r <= 30; r += 10) it.circle(cx, cy, r, ring);
+          for (auto &p : id(pl_trail))
+            it.draw_pixel_at(cx + (int) (p.first * scale), cy - (int) (p.second * scale), Color(90, 90, 40));
+          int px = cx + (int) (id(pl_dx) * scale), py = cy - (int) (id(pl_dy) * scale);
+          float tr = id(pl_track) * M_PI / 180.0f;
+          it.line(px, py, px + (int) (5 * sinf(tr)), py - (int) (5 * cosf(tr)), id(c_amber));
+          it.filled_rectangle(px - 1, py - 1, 3, 3, id(c_amber));
+          it.filled_rectangle(cx - 1, cy - 1, 3, 3, Color(40, 230, 80));   // home
+          it.print(1, 63, id(f8), id(c_dim), TextAlign::BOTTOM_LEFT, "N");
+          for (int y = 0; y < 64; y += 2) it.draw_pixel_at(64, y, id(c_gray));
+        }
+        it.print(x0, 0, id(f16), id(c_amber), TextAlign::TOP_LEFT, id(pl_flight).c_str());
+        it.print(xr, 2, id(f8), id(c_amber), TextAlign::TOP_RIGHT, id(pl_type).c_str());
+        const std::string &route = id(pl_route).empty() ? id(pl_reg) : id(pl_route);
+        it.print(x0, 19, id(f16), id(c_white), TextAlign::TOP_LEFT, route.c_str());
+        int alt = id(pl_alt);
+        const char *arrow = id(pl_rate) > 300 ? " ^" : (id(pl_rate) < -300 ? " v" : "");
+        if (alt >= 1000)
+          it.printf(x0, 40, id(f8), id(c_cyan), TextAlign::TOP_LEFT, "%d,%03d FT%s", alt / 1000, alt % 1000, arrow);
+        else
+          it.printf(x0, 40, id(f8), id(c_cyan), TextAlign::TOP_LEFT, "%d FT%s", alt, arrow);
+        it.printf(xr, 40, id(f8), id(c_cyan), TextAlign::TOP_RIGHT, "%.0f KT", id(pl_gs));
+        it.print(x0, 52, id(f8), id(c_dim), TextAlign::TOP_LEFT, id(pl_airline).c_str());
+        float d = sqrtf(id(pl_dx) * id(pl_dx) + id(pl_dy) * id(pl_dy));
+        it.printf(xr, 52, id(f8), id(c_dim), TextAlign::TOP_RIGHT, "%.1f MI", d);
         return;
       }
 
