@@ -3,9 +3,9 @@
 # Panels get 5V from the MEAN WELL through their own red/black leads; leave
 # the Matrix Portal's screw terminals empty while it's on USB-C.
 #
-# The sign runs its own logic: clock (network time) and weather (Open-Meteo)
-# are fetched on the device. Home Assistant only controls it and pushes things
-# that live in HA, through these actions:
+# The sign runs its own logic: clock (network time, with Home Assistant as a
+# backup) and weather (Open-Meteo) are fetched on the device. Home Assistant
+# only controls it and pushes things that live in HA, through these actions:
 #   esphome.led_sign_show_message  line1, line2, seconds
 #   esphome.led_sign_show_timer    label, remaining, duration   (seconds)
 #   esphome.led_sign_clear_timer
@@ -25,7 +25,7 @@
 # (adjustable in HA) and looks up its route on adsbdb.com.
 
 substitutions:
-  panels: "2"          # change to "3" when the third panel is connected
+  panels: "3"          # panels chained left to right
   latitude: "41.83"    # weather location (city level is enough)
   longitude: "-87.81"
   home_lat: "41.83"    # exact home position for "overhead" (set precisely in ESPHome)
@@ -124,13 +124,22 @@ wifi:
     - delay: 5s
     - script.execute: fetch_weather
 
+# Both sources set the same system clock, so the sign keeps time if either the
+# internet (NTP) or Home Assistant is down.
 time:
   - platform: sntp
     id: sntp_time
     timezone: America/Chicago
+  - platform: homeassistant
+    timezone: America/Chicago
 
+# Requests block the main loop while they run; keep them short so the display
+# and Wi-Fi installs stay responsive when a site (or DNS) is down.
 http_request:
-  timeout: 10s
+  timeout: 4s
+
+debug:
+  update_interval: 60s
 
 globals:
   - id: wx_temp
@@ -239,6 +248,10 @@ globals:
   - id: np_art_ok
     type: bool
     initial_value: 'false'
+  # Pause internet fetches until this millis() value after a failure.
+  - id: net_pause_until
+    type: uint32_t
+    initial_value: '0'
 
 script:
   - id: fetch_weather
@@ -269,6 +282,7 @@ script:
           on_error:
             then:
               - logger.log: "Weather request failed"
+              - lambda: 'id(net_pause_until) = millis() + 120000;'
 
   - id: fetch_planes
     mode: single
@@ -296,7 +310,8 @@ script:
                         json::parse_json(body, [&](JsonObject root) -> bool {
                           float best = 1e9;
                           JsonObject pick;
-                          for (JsonObject a : root["ac"].as<JsonArray>()) {
+                          JsonArray aircraft = root["ac"];
+                          for (JsonObject a : aircraft) {
                             if (!a["lat"].is<float>() || !a["alt_baro"].is<int>()) continue;  // "ground" is a string
                             int alt = a["alt_baro"].as<int>();
                             if (alt > max_alt) continue;
@@ -335,6 +350,7 @@ script:
           on_error:
             then:
               - logger.log: "Plane request failed"
+              - lambda: 'id(net_pause_until) = millis() + 120000;'
 
   - id: fetch_route
     mode: single
@@ -471,6 +487,7 @@ script:
           on_error:
             then:
               - logger.log: "Amtrak request failed"
+              - lambda: 'id(net_pause_until) = millis() + 120000;'
 
 interval:
   - interval: 30s
@@ -493,17 +510,30 @@ interval:
           id(amtk_slot) = pick;
       - if:
           condition:
-            switch.is_on: show_trains
+            and:
+              - switch.is_on: show_trains
+              - lambda: 'return id(sntp_time).now().is_valid() && (int32_t) (millis() - id(net_pause_until)) >= 0;'
           then:
             - script.execute: fetch_amtrak
+      - if:
+          condition:
+            lambda: 'return id(wx_code) < 0 && (int32_t) (millis() - id(net_pause_until)) >= 0;'
+          then:
+            - script.execute: fetch_weather   # no weather yet (e.g. first try failed)
   - interval: 15min
     then:
-      - script.execute: fetch_weather
+      - if:
+          condition:
+            lambda: 'return (int32_t) (millis() - id(net_pause_until)) >= 0;'
+          then:
+            - script.execute: fetch_weather
   - interval: 10s
     then:
       - if:
           condition:
-            switch.is_on: show_planes
+            and:
+              - switch.is_on: show_planes
+              - lambda: 'return id(sntp_time).now().is_valid() && (int32_t) (millis() - id(net_pause_until)) >= 0;'
           then:
             - script.execute: fetch_planes
       - lambda: |-
@@ -608,7 +638,15 @@ number:
     restore_value: true
     initial_value: 90
 
+sensor:
+  - platform: uptime
+    name: "Uptime"
+    update_interval: 60s
+
 text_sensor:
+  - platform: debug
+    reset_reason:
+      name: "Last restart reason"
   - platform: template
     name: "Overhead flight"
     id: overhead_flight
@@ -618,8 +656,9 @@ text_sensor:
     id: next_amtrak
     icon: mdi:train
 
-online_image:
-  - id: album_art
+image:
+  - platform: online_image
+    id: album_art
     url: "http://localhost/none.jpg"   # replaced by show_now_playing
     format: JPEG
     type: RGB565
