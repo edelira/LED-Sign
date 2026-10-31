@@ -52,6 +52,13 @@ esphome:
 
 esp32:
   board: adafruit_matrixportal_esp32s3
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      # The three panels' DMA buffers take most of the internal RAM; put TLS
+      # (HTTPS) and Wi-Fi buffers in PSRAM so web requests have room.
+      CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC: y
+      CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP: y
 
 psram:
   mode: quad
@@ -517,7 +524,9 @@ interval:
             - script.execute: fetch_amtrak
       - if:
           condition:
-            lambda: 'return id(wx_code) < 0 && (int32_t) (millis() - id(net_pause_until)) >= 0;'
+            and:
+              - wifi.connected:
+              - lambda: 'return id(wx_code) < 0 && (int32_t) (millis() - id(net_pause_until)) >= 0;'
           then:
             - script.execute: fetch_weather   # no weather yet (e.g. first try failed)
   - interval: 15min
@@ -642,6 +651,9 @@ sensor:
   - platform: uptime
     name: "Uptime"
     update_interval: 60s
+  - platform: debug
+    free:
+      name: "Free memory"
 
 text_sensor:
   - platform: debug
