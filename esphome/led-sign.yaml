@@ -9,7 +9,16 @@
 #   esphome.led_sign_show_message  line1, line2, seconds
 #   esphome.led_sign_show_timer    label, remaining, duration   (seconds)
 #   esphome.led_sign_clear_timer
-# Screen priority: timer > message > plane overhead > idle (clock + weather).
+#   esphome.led_sign_show_now_playing   title, artist, source, art_url
+#   esphome.led_sign_clear_now_playing
+# Screen priority: timer > message > Amtrak passing > plane overhead >
+# now playing > idle (clock + weather).
+#
+# Amtrak: the sign polls api.amtraker.com for the trains that pass the house
+# (Southwest Chief 3/4, California Zephyr 5/6, Illinois Zephyr / Carl Sandburg
+# 380-383) and estimates when each passes the yard by interpolating between
+# its Chicago Union Station time and its next/previous stop (La Grange Road or
+# Naperville), by track mileage. "Train offset" and "Train window" in HA tune it.
 #
 # Planes: the sign polls adsb.lol (free, no key) every 10 s for aircraft near
 # home_lat/home_lon, picks the closest one inside the radius/altitude limits
@@ -21,6 +30,7 @@ substitutions:
   longitude: "-87.81"
   home_lat: "41.83"    # exact home position for "overhead" (set precisely in ESPHome)
   home_lon: "-87.81"
+  yard_mp: "10.1"      # house position, BNSF miles from Chicago Union Station
 
 esphome:
   name: led-sign
@@ -73,6 +83,36 @@ api:
     - action: clear_timer
       then:
         - lambda: 'id(timer_end) = 0;'
+    - action: show_now_playing
+      variables:
+        title: string
+        artist: string
+        source: string
+        art_url: string
+      then:
+        - lambda: |-
+            id(np_title) = title;
+            id(np_artist) = artist;
+            id(np_source) = source;
+            id(np_active) = true;
+        - if:
+            condition:
+              lambda: 'return art_url != id(np_art_url);'
+            then:
+              - lambda: |-
+                  id(np_art_url) = art_url;
+                  id(np_art_ok) = false;
+              - if:
+                  condition:
+                    lambda: 'return !art_url.empty();'
+                  then:
+                    - online_image.set_url:
+                        id: album_art
+                        url: !lambda 'return art_url;'
+                    - component.update: album_art
+    - action: clear_now_playing
+      then:
+        - lambda: 'id(np_active) = false;'
 
 ota:
   - platform: esphome
@@ -156,6 +196,49 @@ globals:
     type: std::string
   - id: pl_route_for
     type: std::string
+  # Amtrak, one slot per train number in amtk_nums (filled in by fetch_amtrak)
+  - id: amtk_nums
+    type: std::vector<int>
+    initial_value: '{3, 4, 5, 6, 380, 381, 382, 383}'
+  - id: amtk_pass        # estimated pass time at the yard (epoch s), 0 = none
+    type: std::vector<int64_t>
+    initial_value: 'std::vector<int64_t>(8, 0)'
+  - id: amtk_late        # minutes late at the yard (negative = early)
+    type: std::vector<int>
+    initial_value: 'std::vector<int>(8, 0)'
+  - id: amtk_west        # true = westbound (leaving Chicago)
+    type: std::vector<bool>
+    initial_value: 'std::vector<bool>(8, false)'
+  - id: amtk_dest
+    type: std::vector<std::string>
+    initial_value: 'std::vector<std::string>(8)'
+  - id: amtk_name
+    type: std::vector<std::string>
+    initial_value: 'std::vector<std::string>(8)'
+  - id: amtk_fetched     # when each slot was last refreshed
+    type: std::vector<int64_t>
+    initial_value: 'std::vector<int64_t>(8, 0)'
+  - id: amtk_rr          # round-robin position
+    type: int
+    initial_value: '0'
+  - id: amtk_slot        # slot being fetched
+    type: int
+    initial_value: '0'
+  # Now playing (pushed from HA)
+  - id: np_active
+    type: bool
+    initial_value: 'false'
+  - id: np_title
+    type: std::string
+  - id: np_artist
+    type: std::string
+  - id: np_source
+    type: std::string
+  - id: np_art_url
+    type: std::string
+  - id: np_art_ok
+    type: bool
+    initial_value: 'false'
 
 script:
   - id: fetch_weather
@@ -278,7 +361,141 @@ script:
                     return true;
                   });
 
+  - id: fetch_amtrak
+    mode: single
+    then:
+      - http_request.get:
+          url: !lambda 'return "https://api.amtraker.com/v3/trains/" + std::to_string(id(amtk_nums)[id(amtk_slot)]);'
+          capture_response: true
+          max_response_buffer_size: 65536
+          on_response:
+            then:
+              - lambda: |-
+                  const int slot = id(amtk_slot);
+                  const int64_t now = id(sntp_time).now().timestamp;
+                  id(amtk_fetched)[slot] = now;
+                  if (response->status_code != 200) {
+                    ESP_LOGW("amtrak", "Train %d: HTTP %d", id(amtk_nums)[slot], response->status_code);
+                    return;
+                  }
+                  // ISO 8601 with offset (2026-10-31T14:05:00-05:00) -> epoch seconds.
+                  auto iso = [](const char *s) -> int64_t {
+                    int Y, M, D, h, m, sec;
+                    if (s == nullptr || sscanf(s, "%d-%d-%dT%d:%d:%d", &Y, &M, &D, &h, &m, &sec) != 6) return 0;
+                    const char *tz = s + 19;
+                    while (*tz == '.' || isdigit((unsigned char) *tz)) tz++;
+                    int oh = 0, om = 0;
+                    if (*tz == '+' || *tz == '-') sscanf(tz + 1, "%d:%d", &oh, &om);
+                    int off = (oh * 3600 + om * 60) * (*tz == '-' ? -1 : 1);
+                    Y -= M <= 2;
+                    const int era = (Y >= 0 ? Y : Y - 399) / 400;
+                    const unsigned yoe = Y - era * 400;
+                    const unsigned doy = (153 * (M + (M > 2 ? -3 : 9)) + 2) / 5 + D - 1;
+                    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+                    const int64_t days = (int64_t) era * 146097 + doe - 719468;
+                    return days * 86400 + h * 3600 + m * 60 + sec - off;
+                  };
+                  // Station mileposts on the BNSF from Chicago Union Station.
+                  auto mp = [](const std::string &c) -> float {
+                    if (c == "CHI") return 0.0f;
+                    if (c == "LAG") return 13.4f;
+                    if (c == "NPV") return 28.4f;
+                    return -1.0f;
+                  };
+                  const float yard = ${yard_mp};
+                  int64_t best = 0;
+                  int best_late = 0;
+                  bool best_west = false;
+                  std::string best_dest, best_name;
+                  json::parse_json(body, [&](JsonObject root) -> bool {
+                    for (JsonPair kv : root) {
+                      for (JsonObject tr : kv.value().as<JsonArray>()) {
+                        JsonArray st = tr["stations"];
+                        const int n = st.size();
+                        int chi = -1;
+                        for (int i = 0; i < n; i++)
+                          if (strcmp(st[i]["code"] | "", "CHI") == 0) { chi = i; break; }
+                        if (chi < 0 || n < 2) continue;
+                        const bool west = chi == 0;
+                        JsonObject a = west ? st[0].as<JsonObject>() : st[chi - 1].as<JsonObject>();
+                        JsonObject b = west ? st[1].as<JsonObject>() : st[chi].as<JsonObject>();
+                        const float mpa = mp(a["code"] | ""), mpb = mp(b["code"] | "");
+                        if (mpa < 0 || mpb < 0 || mpa == mpb) continue;
+                        const float f = (yard - mpa) / (mpb - mpa);
+                        int64_t ta = iso(a["dep"] | ""), tb = iso(b["arr"] | "");
+                        const int64_t sa = iso(a["schDep"] | ""), sb = iso(b["schArr"] | "");
+                        if (ta == 0) ta = sa;
+                        if (tb == 0) tb = iso(b["dep"] | "");
+                        if (tb == 0) tb = sb;
+                        if (ta == 0 || tb == 0 || sa == 0 || sb == 0) continue;
+                        const int64_t pass = ta + (int64_t) (f * (tb - ta));
+                        const int64_t sched = sa + (int64_t) (f * (sb - sa));
+                        if (pass < now - 600) continue;           // already went by
+                        if (best == 0 || pass < best) {
+                          best = pass;
+                          best_late = (int) lroundf((pass - sched) / 60.0f);
+                          best_west = west;
+                          best_dest = tr["destName"] | "";
+                          best_name = tr["routeName"] | "";
+                        }
+                      }
+                    }
+                    return true;
+                  });
+                  id(amtk_pass)[slot] = best;
+                  id(amtk_late)[slot] = best_late;
+                  id(amtk_west)[slot] = best_west;
+                  id(amtk_dest)[slot] = best_dest;
+                  // Short route names that fit the sign.
+                  const std::string &r = best_name;
+                  id(amtk_name)[slot] = r.find("California") != std::string::npos ? "CA ZEPHYR"
+                                      : r.find("Southwest") != std::string::npos ? "SW CHIEF"
+                                      : r.find("Illinois") != std::string::npos ? "IL ZEPHYR"
+                                      : r.find("Sandburg") != std::string::npos ? "CARL SANDBURG"
+                                      : "AMTRAK";
+                  // Tell HA which Amtrak passes next.
+                  int64_t next = 0;
+                  int ni = -1;
+                  for (int i = 0; i < (int) id(amtk_pass).size(); i++) {
+                    int64_t p = id(amtk_pass)[i];
+                    if (p > now - 120 && (next == 0 || p < next)) { next = p; ni = i; }
+                  }
+                  if (ni >= 0) {
+                    auto t = ESPTime::from_epoch_local(next + (int64_t) id(train_offset).state);
+                    char buf[48];
+                    snprintf(buf, sizeof(buf), "#%d %s %d:%02d%s", id(amtk_nums)[ni],
+                             id(amtk_west)[ni] ? "WB" : "EB", t.hour % 12 == 0 ? 12 : t.hour % 12,
+                             t.minute, t.hour < 12 ? "AM" : "PM");
+                    if (id(next_amtrak).state != buf) id(next_amtrak).publish_state(buf);
+                  }
+          on_error:
+            then:
+              - logger.log: "Amtrak request failed"
+
 interval:
+  - interval: 30s
+    then:
+      - lambda: |-
+          // Refresh a train that passes within 15 min every 30 s; otherwise
+          // walk through all trains (each one about every 4 min).
+          const int64_t now = id(sntp_time).now().timestamp;
+          if (now < 1600000000) return;
+          int pick = -1;
+          int64_t soonest = 0;
+          for (int i = 0; i < (int) id(amtk_pass).size(); i++) {
+            int64_t p = id(amtk_pass)[i];
+            if (p > now - 180 && p < now + 900 && (pick < 0 || p < soonest)) { pick = i; soonest = p; }
+          }
+          if (pick < 0) {
+            pick = id(amtk_rr);
+            id(amtk_rr) = (id(amtk_rr) + 1) % id(amtk_nums).size();
+          }
+          id(amtk_slot) = pick;
+      - if:
+          condition:
+            switch.is_on: show_trains
+          then:
+            - script.execute: fetch_amtrak
   - interval: 15min
     then:
       - script.execute: fetch_weather
@@ -317,6 +534,12 @@ switch:
     name: "Show planes"
     id: show_planes
     icon: mdi:airplane
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  - platform: template
+    name: "Show trains"
+    id: show_trains
+    icon: mdi:train
     optimistic: true
     restore_mode: RESTORE_DEFAULT_ON
 
@@ -362,12 +585,51 @@ number:
     optimistic: true
     restore_value: true
     initial_value: 10000
+  - platform: template
+    name: "Train offset"
+    id: train_offset
+    icon: mdi:timer-cog-outline
+    unit_of_measurement: "s"
+    min_value: -600
+    max_value: 600
+    step: 5
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+  - platform: template
+    name: "Train window"
+    id: train_window
+    icon: mdi:arrow-expand-horizontal
+    unit_of_measurement: "s"
+    min_value: 15
+    max_value: 600
+    step: 15
+    optimistic: true
+    restore_value: true
+    initial_value: 90
 
 text_sensor:
   - platform: template
     name: "Overhead flight"
     id: overhead_flight
     icon: mdi:airplane
+  - platform: template
+    name: "Next Amtrak"
+    id: next_amtrak
+    icon: mdi:train
+
+online_image:
+  - id: album_art
+    url: "http://localhost/none.jpg"   # replaced by show_now_playing
+    format: JPEG
+    type: RGB565
+    resize: 64x64
+    update_interval: never
+    buffer_size: 65536
+    on_download_finished:
+      - lambda: 'id(np_art_ok) = true;'
+    on_error:
+      - lambda: 'id(np_art_ok) = false;'
 
 font:
   - file: "gfonts://Silkscreen"
@@ -405,6 +667,10 @@ color:
     red_int: 60
     green_int: 200
     blue_int: 255
+  - id: c_green
+    red_int: 40
+    green_int: 230
+    blue_int: 80
 
 display:
   - platform: hub75
@@ -417,12 +683,26 @@ display:
     bit_depth: 8
     brightness: 100
     double_buffer: true
-    update_interval: 250ms
+    update_interval: 80ms   # fast enough for smooth text scrolling
     # Panels use FM6124 driver chips. If they stay dark, uncomment:
     # shift_driver: FM6124
     lambda: |-
       const int W = it.get_width();
       auto now = id(sntp_time).now();
+      // Print text, scrolling it sideways when it doesn't fit between x0 and x1.
+      auto marquee = [&](int x0, int x1, int y, display::BaseFont *f, Color c, const std::string &s) {
+        int bx, by, w, h;
+        it.get_text_bounds(0, y, s.c_str(), f, TextAlign::TOP_LEFT, &bx, &by, &w, &h);
+        if (w <= x1 - x0) {
+          it.print(x0, y, f, c, TextAlign::TOP_LEFT, s.c_str());
+          return;
+        }
+        const int gap = 24, off = (millis() / 40) % (w + gap);
+        it.start_clipping(x0, y, x1, y + h + 2);
+        it.print(x0 - off, y, f, c, TextAlign::TOP_LEFT, s.c_str());
+        it.print(x0 - off + w + gap, y, f, c, TextAlign::TOP_LEFT, s.c_str());
+        it.end_clipping();
+      };
       if (!now.is_valid()) {
         it.print(W / 2, 32, id(f8), id(c_dim), TextAlign::CENTER, "CONNECTING...");
         return;
@@ -465,6 +745,47 @@ display:
         return;
       }
 
+      // ---- Amtrak passing ----
+      if (id(show_trains).state) {
+        const int64_t win = (int64_t) id(train_window).state, offs = (int64_t) id(train_offset).state;
+        int slot = -1;
+        for (int i = 0; i < (int) id(amtk_pass).size(); i++) {
+          int64_t p = id(amtk_pass)[i];
+          if (p > 0 && ts >= p + offs - win && ts <= p + offs + win) { slot = i; break; }
+        }
+        if (slot >= 0) {
+          const int num = id(amtk_nums)[slot];
+          const bool wide = W >= 192;
+          const int x0 = wide ? 70 : 2, xr = W - 2;
+          if (wide) {
+            // Amtrak-style locomotive nose: silver body, blue and red stripes.
+            Color silver(170, 175, 185), blue(30, 80, 200), red(220, 30, 40);
+            it.filled_rectangle(14, 16, 36, 30, silver);
+            it.filled_rectangle(18, 20, 28, 9, Color(150, 200, 255));
+            it.filled_rectangle(14, 34, 36, 3, blue);
+            it.filled_rectangle(14, 38, 36, 2, red);
+            it.filled_rectangle(17, 42, 4, 2, Color(255, 220, 60));
+            it.filled_rectangle(43, 42, 4, 2, Color(255, 220, 60));
+            it.print(32, 50, id(f8), id(c_red), TextAlign::TOP_CENTER, "AMTRAK");
+            for (int y = 0; y < 64; y += 2) it.draw_pixel_at(64, y, id(c_gray));
+          }
+          marquee(x0, xr, 0, id(f16), id(c_amber), id(amtk_name)[slot]);
+          it.printf(x0, 19, id(f8), id(c_white), TextAlign::TOP_LEFT, "#%d  %s", num,
+                    id(amtk_west)[slot] ? "WESTBOUND" : "EASTBOUND");
+          std::string dest = "TO " + id(amtk_dest)[slot];
+          for (auto &ch : dest) ch = toupper(ch);
+          marquee(x0, xr, 31, id(f8), id(c_white), dest);
+          if ((millis() / 600) % 2 == 0)
+            it.print(x0, 52, id(f8), id(c_red), TextAlign::TOP_LEFT, "PASSING");
+          const int late = id(amtk_late)[slot];
+          if (late > 1)
+            it.printf(xr, 52, id(f8), id(c_red), TextAlign::TOP_RIGHT, "%d MIN LATE", late);
+          else
+            it.print(xr, 52, id(f8), id(c_green), TextAlign::TOP_RIGHT, "ON TIME");
+          return;
+        }
+      }
+
       // ---- Plane overhead ----
       if (id(pl_last_seen) > 0 && !id(pl_flight).empty()) {
         const bool radar = W >= 192;
@@ -498,6 +819,29 @@ display:
         it.print(x0, 52, id(f8), id(c_dim), TextAlign::TOP_LEFT, id(pl_airline).c_str());
         float d = sqrtf(id(pl_dx) * id(pl_dx) + id(pl_dy) * id(pl_dy));
         it.printf(xr, 52, id(f8), id(c_dim), TextAlign::TOP_RIGHT, "%.1f MI", d);
+        return;
+      }
+
+      // ---- Now playing (kitchen) ----
+      if (id(np_active)) {
+        const bool wide = W >= 192;
+        const int x0 = wide ? 70 : 2, xr = W - 2;
+        if (wide) {
+          if (id(np_art_ok)) {
+            it.image(0, 0, id(album_art));
+          } else {
+            // Music note placeholder while the album art loads (or if there is none).
+            it.filled_circle(24, 42, 7, id(c_amber));
+            it.filled_circle(42, 38, 7, id(c_amber));
+            it.filled_rectangle(29, 16, 3, 27, id(c_amber));
+            it.filled_rectangle(47, 12, 3, 27, id(c_amber));
+            it.filled_rectangle(29, 12, 21, 5, id(c_amber));
+          }
+        }
+        it.print(x0, 2, id(f8), id(c_dim), TextAlign::TOP_LEFT, "NOW PLAYING");
+        it.print(xr, 2, id(f8), id(c_dim), TextAlign::TOP_RIGHT, id(np_source).c_str());
+        marquee(x0, xr, 17, id(f16), id(c_amber), id(np_title));
+        marquee(x0, xr, 40, id(f8), id(c_white), id(np_artist));
         return;
       }
 
