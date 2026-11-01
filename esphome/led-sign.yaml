@@ -92,6 +92,10 @@ api:
         seconds: int
       then:
         - lambda: |-
+            // A new train (not a refresh of the one showing) restarts the
+            // full-width entrance animation.
+            if (id(tr_until) <= id(sntp_time).now().timestamp || train_number != id(tr_number))
+              id(tr_start) = millis();
             id(tr_operator) = company;
             id(tr_name) = name;
             id(tr_number) = train_number;
@@ -272,6 +276,9 @@ globals:
   - id: tr_until
     type: int64_t
     initial_value: '0'
+  - id: tr_start       # millis() when the current train arrived (animation clock)
+    type: uint32_t
+    initial_value: '0'
   # Now playing (pushed from HA)
   - id: np_active
     type: bool
@@ -446,12 +453,16 @@ color:
     green_int: 230
     blue_int: 80
 
-# Redraw the screen every 80 ms (smooth scrolling); the panels themselves
-# refresh at min_refresh_rate.
+# Redraw the screen every 80 ms (smooth scrolling), or every 40 ms (25 fps)
+# while the train animation is on. The panels themselves refresh at
+# min_refresh_rate.
 interval:
-  - interval: 80ms
+  - interval: 40ms
     then:
-      - component.update: sign
+      - lambda: |-
+          static uint8_t tick = 0;
+          bool animating = id(show_trains).state && id(tr_until) > id(sntp_time).now().timestamp;
+          if (animating || ++tick % 2 == 0) id(sign).update();
 
 display:
   - platform: hub75
@@ -464,14 +475,12 @@ display:
     bit_depth: 8
     brightness: 100
     double_buffer: true
-    # Redrawn by the interval below. With a fixed update_interval ESPHome
+    # Redrawn by the interval above. With a fixed update_interval ESPHome
     # derives the panel refresh from it (~40 Hz), which flickers slightly.
     update_interval: never
     min_refresh_rate: 120
-    # Faint green streaks below bright pixels are "ghosting": the next row's
-    # data shows while the row address changes. Blanking the output a little
-    # longer around each latch hides it. (shift_driver: FM6124 left the DMA
-    # uninitialised on this board, so the display stayed dark.)
+    # Hides faint green "ghost" streaks below bright pixels. (shift_driver:
+    # FM6124 left the DMA uninitialised on this board; don't use it.)
     latch_blanking: 2
     lambda: |-
       const int W = it.get_width();
@@ -536,15 +545,91 @@ display:
       if (id(show_trains).state && id(tr_until) > ts) {
         const bool wide = W >= 192;
         const int x0 = wide ? 70 : 2, xr = W - 2;
+        const uint32_t el = millis() - id(tr_start);
+        const bool left = id(tr_west);           // westbound runs right to left
+        const float phase = el * 0.0225f;        // wheel spin
+
+        // Colours by operator: Amtrak silver/blue/red, freight orange.
+        Color body(170, 175, 185), st1(30, 80, 200), st2(220, 30, 40);
+        if (id(tr_operator) == "FREIGHT") { body = Color(230, 100, 20); st1 = Color(20, 20, 20); st2 = Color(255, 200, 40); }
+        const Color glass(110, 160, 230), dark(25, 30, 45), wheel(60, 60, 60);
+        const Color rail(90, 90, 90), tie(60, 40, 25), lamp(255, 220, 60);
+
+        // Drawing helpers, clipped by hand to [clip0, clip1).
+        int clip0 = 0, clip1 = W;
+        auto box = [&](int x, int y, int w, int h, Color c) {
+          int a = std::max(x, clip0), b = std::min(x + w, clip1);
+          int t = std::max(y, 0), u = std::min(y + h, 64);
+          if (a < b && t < u) it.filled_rectangle(a, t, b - a, u - t, c);
+        };
+        auto wheels = [&](int x, int top, int L, int h) {
+          int r = std::max(1, h / 8), y = top + h + r - 1;
+          for (int cx : {x + 3 + r, x + 5 + 3 * r, x + L - 5 - 3 * r, x + L - 3 - r}) {
+            for (int dy = -r; dy <= r; dy++) {
+              int hw = (int) sqrtf(r * r + r - dy * dy);
+              box(cx - hw, y + dy, 2 * hw + 1, 1, wheel);
+            }
+            box(cx + lroundf(r * 0.7f * cosf(phase)), y + lroundf(r * 0.7f * sinf(phase)), 1, 1, body);
+          }
+        };
+        auto car = [&](int x, int top, int L, int h) {
+          box(x + 1, top, L - 2, 1, body);
+          box(x, top + 1, L, h - 1, body);
+          int wy = top + std::max(2, h / 5), wh = std::max(2, h / 4), s = std::max(1, h / 8);
+          for (int wx = x + 3; wx < x + L - 4; wx += std::max(4, h / 3)) box(wx, wy, std::max(2, h / 5), wh, glass);
+          box(x, wy + wh + 1, L, s, st1);
+          box(x, wy + wh + 1 + s, L, 1, st2);
+          wheels(x, top, L, h);
+        };
+        auto loco = [&](int x, int top, int L, int h) {
+          int nose = h / 2, s = std::max(1, h / 8);
+          for (int i = 0; i < L; i++) {
+            int d = left ? i : L - 1 - i;              // distance from the leading end
+            int t = d < nose ? top + nose - d : top;   // sloped nose
+            box(x + i, t, 1, top + h - t, body);
+          }
+          int cw = std::max(3, h / 3);
+          box(left ? x + nose - 1 : x + L - nose - cw + 1, top + h / 4 + 1, cw, std::max(2, h / 4), dark);
+          box(x, top + h * 3 / 5, L, s, st1);
+          box(x, top + h * 3 / 5 + s, L, 1, st2);
+          box(left ? x + 1 : x + L - 3, top + h - std::max(3, h / 4), 2, 2, lamp);
+          wheels(x, top, L, h);
+        };
+        auto track = [&](int y) {
+          box(clip0, y, clip1 - clip0, 1, rail);
+          for (int x = clip0; x < clip1; x += 5) box(x, y + 1, 1, 1, tie);
+        };
+
+        // Entrance: a locomotive and three cars run across the whole sign.
+        const int h = 24, top = 30, cars = 3, gap = 2;
+        const int locoL = h * 12 / 5, carL = h * 29 / 10;
+        const int trainL = locoL + cars * (carL + gap);
+        const int run = (int) (el * 0.125f);     // 125 px/s
+        if (wide && run < W + trainL) {
+          std::string title = id(tr_operator);
+          if (id(tr_number) > 0) title += "  #" + std::to_string(id(tr_number));
+          it.print(W / 2, 2, id(f16), id(c_amber), TextAlign::TOP_CENTER, title.c_str());
+          track(top + h + 5);
+          // Leading end first: westbound enters from the right.
+          int x = left ? W - run : run - trainL;
+          if (left) {
+            loco(x, top, locoL, h);
+            for (int c = 0, cx = x + locoL + gap; c < cars; c++, cx += carL + gap) car(cx, top, carL, h);
+          } else {
+            int cx = x;
+            for (int c = 0; c < cars; c++, cx += carL + gap) car(cx, top, carL, h);
+            loco(cx, top, locoL, h);
+          }
+          return;
+        }
+
         if (wide) {
-          // Locomotive nose: silver body, blue and red stripes.
-          Color silver(170, 175, 185), blue(30, 80, 200), red(220, 30, 40);
-          it.filled_rectangle(14, 16, 36, 30, silver);
-          it.filled_rectangle(18, 20, 28, 9, Color(150, 200, 255));
-          it.filled_rectangle(14, 34, 36, 3, blue);
-          it.filled_rectangle(14, 38, 36, 2, red);
-          it.filled_rectangle(17, 42, 4, 2, Color(255, 220, 60));
-          it.filled_rectangle(43, 42, 4, 2, Color(255, 220, 60));
+          // Left panel: cars rolling past in the direction of travel.
+          const int sh = 14, sL = sh * 29 / 10, step = sL + 2;
+          clip0 = 0; clip1 = 64;
+          track(41);
+          int off = (int) (el * 0.05f) % step;
+          for (int x = left ? -off : off - step; x < 64; x += step) car(x, 22, sL, sh);
           it.print(32, 50, id(f8), id(c_red), TextAlign::TOP_CENTER, id(tr_operator).c_str());
           for (int y = 0; y < 64; y += 2) it.draw_pixel_at(64, y, id(c_gray));
         }
@@ -633,7 +718,6 @@ display:
 
       // Weather column on the third panel.
       const int cx = 160;
-      for (int y = 0; y < 64; y += 2) it.draw_pixel_at(128, y, id(c_gray));
       int code = id(wx_code);
       if (code < 0 || std::isnan(id(wx_temp))) {
         it.print(cx, 32, id(f8), id(c_dim), TextAlign::CENTER, "NO WX");
