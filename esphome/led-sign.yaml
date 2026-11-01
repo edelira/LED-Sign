@@ -446,6 +446,13 @@ color:
     green_int: 230
     blue_int: 80
 
+# Redraw the screen every 80 ms (smooth scrolling); the panels themselves
+# refresh at min_refresh_rate.
+interval:
+  - interval: 80ms
+    then:
+      - component.update: sign
+
 display:
   - platform: hub75
     id: sign
@@ -457,7 +464,10 @@ display:
     bit_depth: 8
     brightness: 100
     double_buffer: true
-    update_interval: 80ms   # fast enough for smooth text scrolling
+    # Redrawn by the interval below. With a fixed update_interval ESPHome
+    # derives the panel refresh from it (~40 Hz), which flickers slightly.
+    update_interval: never
+    min_refresh_rate: 120
     # Faint green streaks below bright pixels are "ghosting": the next row's
     # data shows while the row address changes. Blanking the output a little
     # longer around each latch hides it. (shift_driver: FM6124 left the DMA
