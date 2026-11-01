@@ -458,8 +458,9 @@ display:
     brightness: 100
     double_buffer: true
     update_interval: 80ms   # fast enough for smooth text scrolling
-    # Panels use FM6124 driver chips. If they stay dark, uncomment:
-    # shift_driver: FM6124
+    # Panels use FM6124 driver chips; the generic driver leaves faint green
+    # streaks below bright pixels.
+    shift_driver: FM6124
     lambda: |-
       const int W = it.get_width();
       auto now = id(sntp_time).now();
