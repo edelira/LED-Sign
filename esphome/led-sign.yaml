@@ -3,34 +3,25 @@
 # Panels get 5V from the MEAN WELL through their own red/black leads; leave
 # the Matrix Portal's screw terminals empty while it's on USB-C.
 #
-# The sign runs its own logic: clock (network time, with Home Assistant as a
-# backup), trains and planes are fetched on the device. Weather comes from
-# Home Assistant (weather.forecast_home plus the "LED Sign today high/low"
-# template sensors). HA controls the sign and pushes things that live in HA,
-# through these actions:
-#   esphome.led_sign_show_message  line1, line2, seconds
-#   esphome.led_sign_show_timer    label, remaining, duration   (seconds)
-#   esphome.led_sign_clear_timer
-#   esphome.led_sign_show_now_playing   title, artist, source, art_url
-#   esphome.led_sign_clear_now_playing
-# Screen priority: timer > message > Amtrak passing > plane overhead >
+# The sign only draws. Home Assistant (packages/led_sign.yaml in the HA repo)
+# fetches weather, planes and Amtrak, does the math, and pushes results here.
+# The clock comes from network time with Home Assistant as a backup.
+#
+# Actions HA calls (esphome.led_sign_<name>):
+#   show_message      line1, line2, seconds
+#   show_timer        label, remaining, duration   (seconds)
+#   clear_timer
+#   show_train        operator, name, number, westbound, dest, late, seconds
+#   show_plane        flight, type, route, airline, altitude, rate, speed,
+#                     track, dx, dy, radius        (dx/dy/radius in miles)
+#   clear_plane
+#   show_now_playing  title, artist, source, art_url
+#   clear_now_playing
+# Screen priority: timer > message > train passing > plane overhead >
 # now playing > idle (clock + weather).
-#
-# Amtrak: the sign polls api.amtraker.com for the trains that pass the house
-# (Southwest Chief 3/4, California Zephyr 5/6, Illinois Zephyr / Carl Sandburg
-# 380-383) and estimates when each passes the yard by interpolating between
-# its Chicago Union Station time and its next/previous stop (La Grange Road or
-# Naperville), by track mileage. "Train offset" and "Train window" in HA tune it.
-#
-# Planes: the sign polls adsb.lol (free, no key) every 10 s for aircraft near
-# home_lat/home_lon, picks the closest one inside the radius/altitude limits
-# (adjustable in HA) and looks up its route on adsbdb.com.
 
 substitutions:
   panels: "3"          # panels chained left to right
-  home_lat: "41.83"    # exact home position for "overhead" (set precisely in ESPHome)
-  home_lon: "-87.81"
-  yard_mp: "10.1"      # house position, BNSF miles from Chicago Union Station
 
 esphome:
   name: led-sign
@@ -55,8 +46,8 @@ esp32:
   framework:
     type: esp-idf
     sdkconfig_options:
-      # The three panels' DMA buffers take most of the internal RAM; put TLS
-      # (HTTPS) and Wi-Fi buffers in PSRAM so web requests have room.
+      # The three panels' DMA buffers take most of the internal RAM; keep
+      # TLS and Wi-Fi buffers in PSRAM.
       CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC: y
       CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP: y
 
@@ -90,6 +81,59 @@ api:
     - action: clear_timer
       then:
         - lambda: 'id(timer_end) = 0;'
+    - action: show_train
+      variables:
+        operator: string
+        name: string
+        number: int
+        westbound: bool
+        dest: string
+        late: int
+        seconds: int
+      then:
+        - lambda: |-
+            id(tr_operator) = operator;
+            id(tr_name) = name;
+            id(tr_number) = number;
+            id(tr_west) = westbound;
+            id(tr_dest) = dest;
+            id(tr_late) = late;
+            id(tr_until) = id(sntp_time).now().timestamp + (seconds > 0 ? seconds : 60);
+    - action: show_plane
+      variables:
+        flight: string
+        type: string
+        route: string
+        airline: string
+        altitude: int
+        rate: int
+        speed: float
+        track: float
+        dx: float
+        dy: float
+        radius: float
+      then:
+        - lambda: |-
+            if (flight != id(pl_flight)) id(pl_trail).clear();
+            id(pl_flight) = flight;
+            id(pl_type) = type;
+            id(pl_route) = route;
+            id(pl_airline) = airline;
+            id(pl_alt) = altitude;
+            id(pl_rate) = rate;
+            id(pl_gs) = speed;
+            id(pl_track) = track;
+            id(pl_dx) = dx;
+            id(pl_dy) = dy;
+            id(pl_radius) = radius > 0 ? radius : 1.5f;
+            id(pl_trail).push_back({dx, dy});
+            if (id(pl_trail).size() > 8) id(pl_trail).erase(id(pl_trail).begin());
+            id(pl_last_seen) = id(sntp_time).now().timestamp;
+    - action: clear_plane
+      then:
+        - lambda: |-
+            id(pl_last_seen) = 0;
+            id(pl_flight).clear();
     - action: show_now_playing
       variables:
         title: string
@@ -137,8 +181,7 @@ time:
   - platform: homeassistant
     timezone: America/Chicago
 
-# Requests block the main loop while they run; keep them short so the display
-# and Wi-Fi installs stay responsive when a site (or DNS) is down.
+# Only used to download album art from Home Assistant.
 http_request:
   timeout: 4s
 
@@ -175,12 +218,14 @@ globals:
   - id: timer_duration
     type: int
     initial_value: '0'
-  # Closest qualifying aircraft
+  # Plane overhead (pushed from HA)
   - id: pl_flight
     type: std::string
   - id: pl_type
     type: std::string
-  - id: pl_reg
+  - id: pl_route
+    type: std::string
+  - id: pl_airline
     type: std::string
   - id: pl_alt
     type: int
@@ -200,44 +245,32 @@ globals:
   - id: pl_dy          # miles north of home
     type: float
     initial_value: '0'
+  - id: pl_radius      # radar scale (HA's plane radius), miles
+    type: float
+    initial_value: '1.5'
   - id: pl_last_seen
     type: int64_t
     initial_value: '0'
   - id: pl_trail
     type: std::vector<std::pair<float, float>>
-  - id: pl_route
+  # Train passing (pushed from HA)
+  - id: tr_operator
     type: std::string
-  - id: pl_airline
+  - id: tr_name
     type: std::string
-  - id: pl_route_for
-    type: std::string
-  # Amtrak, one slot per train number in amtk_nums (filled in by fetch_amtrak)
-  - id: amtk_nums
-    type: std::vector<int>
-    initial_value: '{3, 4, 5, 6, 380, 381, 382, 383}'
-  - id: amtk_pass        # estimated pass time at the yard (epoch s), 0 = none
-    type: std::vector<int64_t>
-    initial_value: 'std::vector<int64_t>(8, 0)'
-  - id: amtk_late        # minutes late at the yard (negative = early)
-    type: std::vector<int>
-    initial_value: 'std::vector<int>(8, 0)'
-  - id: amtk_west        # true = westbound (leaving Chicago)
-    type: std::vector<bool>
-    initial_value: 'std::vector<bool>(8, false)'
-  - id: amtk_dest
-    type: std::vector<std::string>
-    initial_value: 'std::vector<std::string>(8)'
-  - id: amtk_name
-    type: std::vector<std::string>
-    initial_value: 'std::vector<std::string>(8)'
-  - id: amtk_fetched     # when each slot was last refreshed
-    type: std::vector<int64_t>
-    initial_value: 'std::vector<int64_t>(8, 0)'
-  - id: amtk_rr          # round-robin position
+  - id: tr_number
     type: int
     initial_value: '0'
-  - id: amtk_slot        # slot being fetched
+  - id: tr_west
+    type: bool
+    initial_value: 'false'
+  - id: tr_dest
+    type: std::string
+  - id: tr_late
     type: int
+    initial_value: '0'
+  - id: tr_until
+    type: int64_t
     initial_value: '0'
   # Now playing (pushed from HA)
   - id: np_active
@@ -254,260 +287,6 @@ globals:
   - id: np_art_ok
     type: bool
     initial_value: 'false'
-  # Pause internet fetches until this millis() value after a failure.
-  - id: net_pause_until
-    type: uint32_t
-    initial_value: '0'
-
-script:
-  - id: fetch_planes
-    mode: single
-    then:
-      - http_request.get:
-          url: !lambda |-
-            // adsb.lol takes the radius in nautical miles; ask a bit wider than the limit.
-            char url[128];
-            snprintf(url, sizeof(url), "https://api.adsb.lol/v2/point/%s/%s/%.1f",
-                     "${home_lat}", "${home_lon}", id(plane_radius).state * 0.869f + 1.0f);
-            return std::string(url);
-          capture_response: true
-          max_response_buffer_size: 32768
-          on_response:
-            then:
-              - if:
-                  condition:
-                    lambda: 'return response->status_code == 200;'
-                  then:
-                    - lambda: |-
-                        const float hlat = ${home_lat}, hlon = ${home_lon};
-                        const float kx = 69.17f * cosf(hlat * M_PI / 180.0f), ky = 69.05f;
-                        const float radius = id(plane_radius).state;
-                        const int max_alt = (int) id(plane_max_alt).state;
-                        json::parse_json(body, [&](JsonObject root) -> bool {
-                          float best = 1e9;
-                          JsonObject pick;
-                          JsonArray aircraft = root["ac"];
-                          for (JsonObject a : aircraft) {
-                            if (!a["lat"].is<float>() || !a["alt_baro"].is<int>()) continue;  // "ground" is a string
-                            int alt = a["alt_baro"].as<int>();
-                            if (alt > max_alt) continue;
-                            float dx = (a["lon"].as<float>() - hlon) * kx;
-                            float dy = (a["lat"].as<float>() - hlat) * ky;
-                            float d = sqrtf(dx * dx + dy * dy);
-                            if (d <= radius && d < best) { best = d; pick = a; }
-                          }
-                          if (pick.isNull()) return true;
-                          std::string flight = pick["flight"] | "";
-                          while (!flight.empty() && flight.back() == ' ') flight.pop_back();
-                          std::string reg = pick["r"] | "";
-                          if (flight.empty()) flight = reg.empty() ? std::string(pick["hex"] | "?") : reg;
-                          if (flight != id(pl_flight)) {
-                            id(pl_trail).clear();
-                            id(pl_route).clear();
-                            id(pl_airline).clear();
-                            id(overhead_flight).publish_state(flight);
-                          }
-                          id(pl_flight) = flight;
-                          id(pl_reg) = reg;
-                          id(pl_type) = pick["t"] | "";
-                          id(pl_alt) = pick["alt_baro"].as<int>();
-                          id(pl_rate) = pick["baro_rate"] | 0;
-                          id(pl_gs) = pick["gs"] | 0.0f;
-                          id(pl_track) = pick["track"] | 0.0f;
-                          id(pl_dx) = (pick["lon"].as<float>() - hlon) * kx;
-                          id(pl_dy) = (pick["lat"].as<float>() - hlat) * ky;
-                          id(pl_trail).push_back({id(pl_dx), id(pl_dy)});
-                          if (id(pl_trail).size() > 8) id(pl_trail).erase(id(pl_trail).begin());
-                          id(pl_last_seen) = id(sntp_time).now().timestamp;
-                          return true;
-                        });
-                        if (id(pl_route_for) != id(pl_flight) && !id(pl_flight).empty())
-                          id(fetch_route).execute();
-          on_error:
-            then:
-              - logger.log: "Plane request failed"
-              - lambda: 'id(net_pause_until) = millis() + 120000;'
-
-  - id: fetch_route
-    mode: single
-    then:
-      - lambda: 'id(pl_route_for) = id(pl_flight);'
-      - delay: 200ms   # let the plane request finish before starting the next one
-      - http_request.get:
-          url: !lambda 'return "https://api.adsbdb.com/v0/callsign/" + id(pl_route_for);'
-          capture_response: true
-          max_response_buffer_size: 8192
-          on_response:
-            then:
-              - lambda: |-
-                  if (response->status_code != 200) return;
-                  json::parse_json(body, [](JsonObject root) -> bool {
-                    JsonObject fr = root["response"]["flightroute"];
-                    if (fr.isNull()) return true;
-                    std::string from = fr["origin"]["iata_code"] | "";
-                    std::string to = fr["destination"]["iata_code"] | "";
-                    if (!from.empty() && !to.empty()) id(pl_route) = from + " > " + to;
-                    std::string airline = fr["airline"]["name"] | "";
-                    if (airline.size() > 18) airline.resize(18);
-                    id(pl_airline) = airline;
-                    return true;
-                  });
-
-  - id: fetch_amtrak
-    mode: single
-    then:
-      - http_request.get:
-          url: !lambda 'return "https://api.amtraker.com/v3/trains/" + std::to_string(id(amtk_nums)[id(amtk_slot)]);'
-          capture_response: true
-          max_response_buffer_size: 65536
-          on_response:
-            then:
-              - lambda: |-
-                  const int slot = id(amtk_slot);
-                  const int64_t now = id(sntp_time).now().timestamp;
-                  id(amtk_fetched)[slot] = now;
-                  if (response->status_code != 200) {
-                    ESP_LOGW("amtrak", "Train %d: HTTP %d", id(amtk_nums)[slot], response->status_code);
-                    return;
-                  }
-                  // ISO 8601 with offset (2026-10-31T14:05:00-05:00) -> epoch seconds.
-                  auto iso = [](const char *s) -> int64_t {
-                    int Y, M, D, h, m, sec;
-                    if (s == nullptr || sscanf(s, "%d-%d-%dT%d:%d:%d", &Y, &M, &D, &h, &m, &sec) != 6) return 0;
-                    const char *tz = s + 19;
-                    while (*tz == '.' || isdigit((unsigned char) *tz)) tz++;
-                    int oh = 0, om = 0;
-                    if (*tz == '+' || *tz == '-') sscanf(tz + 1, "%d:%d", &oh, &om);
-                    int off = (oh * 3600 + om * 60) * (*tz == '-' ? -1 : 1);
-                    Y -= M <= 2;
-                    const int era = (Y >= 0 ? Y : Y - 399) / 400;
-                    const unsigned yoe = Y - era * 400;
-                    const unsigned doy = (153 * (M + (M > 2 ? -3 : 9)) + 2) / 5 + D - 1;
-                    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-                    const int64_t days = (int64_t) era * 146097 + doe - 719468;
-                    return days * 86400 + h * 3600 + m * 60 + sec - off;
-                  };
-                  // Station mileposts on the BNSF from Chicago Union Station.
-                  auto mp = [](const std::string &c) -> float {
-                    if (c == "CHI") return 0.0f;
-                    if (c == "LAG") return 13.4f;
-                    if (c == "NPV") return 28.4f;
-                    return -1.0f;
-                  };
-                  const float yard = ${yard_mp};
-                  int64_t best = 0;
-                  int best_late = 0;
-                  bool best_west = false;
-                  std::string best_dest, best_name;
-                  json::parse_json(body, [&](JsonObject root) -> bool {
-                    for (JsonPair kv : root) {
-                      for (JsonObject tr : kv.value().as<JsonArray>()) {
-                        JsonArray st = tr["stations"];
-                        const int n = st.size();
-                        int chi = -1;
-                        for (int i = 0; i < n; i++)
-                          if (strcmp(st[i]["code"] | "", "CHI") == 0) { chi = i; break; }
-                        if (chi < 0 || n < 2) continue;
-                        const bool west = chi == 0;
-                        JsonObject a = west ? st[0].as<JsonObject>() : st[chi - 1].as<JsonObject>();
-                        JsonObject b = west ? st[1].as<JsonObject>() : st[chi].as<JsonObject>();
-                        const float mpa = mp(a["code"] | ""), mpb = mp(b["code"] | "");
-                        if (mpa < 0 || mpb < 0 || mpa == mpb) continue;
-                        const float f = (yard - mpa) / (mpb - mpa);
-                        int64_t ta = iso(a["dep"] | ""), tb = iso(b["arr"] | "");
-                        const int64_t sa = iso(a["schDep"] | ""), sb = iso(b["schArr"] | "");
-                        if (ta == 0) ta = sa;
-                        if (tb == 0) tb = iso(b["dep"] | "");
-                        if (tb == 0) tb = sb;
-                        if (ta == 0 || tb == 0 || sa == 0 || sb == 0) continue;
-                        const int64_t pass = ta + (int64_t) (f * (tb - ta));
-                        const int64_t sched = sa + (int64_t) (f * (sb - sa));
-                        if (pass < now - 600) continue;           // already went by
-                        if (best == 0 || pass < best) {
-                          best = pass;
-                          best_late = (int) lroundf((pass - sched) / 60.0f);
-                          best_west = west;
-                          best_dest = tr["destName"] | "";
-                          best_name = tr["routeName"] | "";
-                        }
-                      }
-                    }
-                    return true;
-                  });
-                  id(amtk_pass)[slot] = best;
-                  id(amtk_late)[slot] = best_late;
-                  id(amtk_west)[slot] = best_west;
-                  id(amtk_dest)[slot] = best_dest;
-                  // Short route names that fit the sign.
-                  const std::string &r = best_name;
-                  id(amtk_name)[slot] = r.find("California") != std::string::npos ? "CA ZEPHYR"
-                                      : r.find("Southwest") != std::string::npos ? "SW CHIEF"
-                                      : r.find("Illinois") != std::string::npos ? "IL ZEPHYR"
-                                      : r.find("Sandburg") != std::string::npos ? "CARL SANDBURG"
-                                      : "AMTRAK";
-                  // Tell HA which Amtrak passes next.
-                  int64_t next = 0;
-                  int ni = -1;
-                  for (int i = 0; i < (int) id(amtk_pass).size(); i++) {
-                    int64_t p = id(amtk_pass)[i];
-                    if (p > now - 120 && (next == 0 || p < next)) { next = p; ni = i; }
-                  }
-                  if (ni >= 0) {
-                    auto t = ESPTime::from_epoch_local(next + (int64_t) id(train_offset).state);
-                    char buf[48];
-                    snprintf(buf, sizeof(buf), "#%d %s %d:%02d%s", id(amtk_nums)[ni],
-                             id(amtk_west)[ni] ? "WB" : "EB", t.hour % 12 == 0 ? 12 : t.hour % 12,
-                             t.minute, t.hour < 12 ? "AM" : "PM");
-                    if (id(next_amtrak).state != buf) id(next_amtrak).publish_state(buf);
-                  }
-          on_error:
-            then:
-              - logger.log: "Amtrak request failed"
-              - lambda: 'id(net_pause_until) = millis() + 120000;'
-
-interval:
-  - interval: 30s
-    then:
-      - lambda: |-
-          // Refresh a train that passes within 15 min every 30 s; otherwise
-          // walk through all trains (each one about every 4 min).
-          const int64_t now = id(sntp_time).now().timestamp;
-          if (now < 1600000000) return;
-          int pick = -1;
-          int64_t soonest = 0;
-          for (int i = 0; i < (int) id(amtk_pass).size(); i++) {
-            int64_t p = id(amtk_pass)[i];
-            if (p > now - 180 && p < now + 900 && (pick < 0 || p < soonest)) { pick = i; soonest = p; }
-          }
-          if (pick < 0) {
-            pick = id(amtk_rr);
-            id(amtk_rr) = (id(amtk_rr) + 1) % id(amtk_nums).size();
-          }
-          id(amtk_slot) = pick;
-      - if:
-          condition:
-            and:
-              - switch.is_on: show_trains
-              - lambda: 'return id(sntp_time).now().is_valid() && (int32_t) (millis() - id(net_pause_until)) >= 0;'
-          then:
-            - script.execute: fetch_amtrak
-  - interval: 10s
-    then:
-      - if:
-          condition:
-            and:
-              - switch.is_on: show_planes
-              - lambda: 'return id(sntp_time).now().is_valid() && (int32_t) (millis() - id(net_pause_until)) >= 0;'
-          then:
-            - script.execute: fetch_planes
-      - lambda: |-
-          // Forget the plane 20 s after it was last inside the limits.
-          if (id(pl_last_seen) > 0 && id(sntp_time).now().timestamp - id(pl_last_seen) > 20) {
-            id(pl_last_seen) = 0;
-            id(pl_flight).clear();
-            id(pl_route_for).clear();
-            id(overhead_flight).publish_state("none");
-          }
 
 switch:
   - platform: template
@@ -557,50 +336,6 @@ number:
             - hub75.set_brightness:
                 id: sign
                 brightness: !lambda 'return (int) (x * 255 / 100);'
-  - platform: template
-    name: "Plane radius"
-    id: plane_radius
-    icon: mdi:radius-outline
-    unit_of_measurement: "mi"
-    min_value: 0.25
-    max_value: 5
-    step: 0.25
-    optimistic: true
-    restore_value: true
-    initial_value: 1.5
-  - platform: template
-    name: "Plane max altitude"
-    id: plane_max_alt
-    icon: mdi:airplane-marker
-    unit_of_measurement: "ft"
-    min_value: 1000
-    max_value: 40000
-    step: 500
-    optimistic: true
-    restore_value: true
-    initial_value: 10000
-  - platform: template
-    name: "Train offset"
-    id: train_offset
-    icon: mdi:timer-cog-outline
-    unit_of_measurement: "s"
-    min_value: -600
-    max_value: 600
-    step: 5
-    optimistic: true
-    restore_value: true
-    initial_value: 0
-  - platform: template
-    name: "Train window"
-    id: train_window
-    icon: mdi:arrow-expand-horizontal
-    unit_of_measurement: "s"
-    min_value: 15
-    max_value: 600
-    step: 15
-    optimistic: true
-    restore_value: true
-    initial_value: 90
 
 sensor:
   - platform: uptime
@@ -655,14 +390,6 @@ text_sensor:
   - platform: debug
     reset_reason:
       name: "Last restart reason"
-  - platform: template
-    name: "Overhead flight"
-    id: overhead_flight
-    icon: mdi:airplane
-  - platform: template
-    name: "Next Amtrak"
-    id: next_amtrak
-    icon: mdi:train
 
 image:
   - platform: online_image
@@ -792,54 +519,45 @@ display:
         return;
       }
 
-      // ---- Amtrak passing ----
-      if (id(show_trains).state) {
-        const int64_t win = (int64_t) id(train_window).state, offs = (int64_t) id(train_offset).state;
-        int slot = -1;
-        for (int i = 0; i < (int) id(amtk_pass).size(); i++) {
-          int64_t p = id(amtk_pass)[i];
-          if (p > 0 && ts >= p + offs - win && ts <= p + offs + win) { slot = i; break; }
+      // ---- Train passing ----
+      if (id(show_trains).state && id(tr_until) > ts) {
+        const bool wide = W >= 192;
+        const int x0 = wide ? 70 : 2, xr = W - 2;
+        if (wide) {
+          // Locomotive nose: silver body, blue and red stripes.
+          Color silver(170, 175, 185), blue(30, 80, 200), red(220, 30, 40);
+          it.filled_rectangle(14, 16, 36, 30, silver);
+          it.filled_rectangle(18, 20, 28, 9, Color(150, 200, 255));
+          it.filled_rectangle(14, 34, 36, 3, blue);
+          it.filled_rectangle(14, 38, 36, 2, red);
+          it.filled_rectangle(17, 42, 4, 2, Color(255, 220, 60));
+          it.filled_rectangle(43, 42, 4, 2, Color(255, 220, 60));
+          it.print(32, 50, id(f8), id(c_red), TextAlign::TOP_CENTER, id(tr_operator).c_str());
+          for (int y = 0; y < 64; y += 2) it.draw_pixel_at(64, y, id(c_gray));
         }
-        if (slot >= 0) {
-          const int num = id(amtk_nums)[slot];
-          const bool wide = W >= 192;
-          const int x0 = wide ? 70 : 2, xr = W - 2;
-          if (wide) {
-            // Amtrak-style locomotive nose: silver body, blue and red stripes.
-            Color silver(170, 175, 185), blue(30, 80, 200), red(220, 30, 40);
-            it.filled_rectangle(14, 16, 36, 30, silver);
-            it.filled_rectangle(18, 20, 28, 9, Color(150, 200, 255));
-            it.filled_rectangle(14, 34, 36, 3, blue);
-            it.filled_rectangle(14, 38, 36, 2, red);
-            it.filled_rectangle(17, 42, 4, 2, Color(255, 220, 60));
-            it.filled_rectangle(43, 42, 4, 2, Color(255, 220, 60));
-            it.print(32, 50, id(f8), id(c_red), TextAlign::TOP_CENTER, "AMTRAK");
-            for (int y = 0; y < 64; y += 2) it.draw_pixel_at(64, y, id(c_gray));
-          }
-          marquee(x0, xr, 0, id(f16), id(c_amber), id(amtk_name)[slot]);
-          it.printf(x0, 19, id(f8), id(c_white), TextAlign::TOP_LEFT, "#%d  %s", num,
-                    id(amtk_west)[slot] ? "WESTBOUND" : "EASTBOUND");
-          std::string dest = "TO " + id(amtk_dest)[slot];
-          for (auto &ch : dest) ch = toupper(ch);
-          marquee(x0, xr, 31, id(f8), id(c_white), dest);
-          if ((millis() / 600) % 2 == 0)
-            it.print(x0, 52, id(f8), id(c_red), TextAlign::TOP_LEFT, "PASSING");
-          const int late = id(amtk_late)[slot];
-          if (late > 1)
-            it.printf(xr, 52, id(f8), id(c_red), TextAlign::TOP_RIGHT, "%d MIN LATE", late);
-          else
-            it.print(xr, 52, id(f8), id(c_green), TextAlign::TOP_RIGHT, "ON TIME");
-          return;
-        }
+        marquee(x0, xr, 0, id(f16), id(c_amber), id(tr_name));
+        it.printf(x0, 19, id(f8), id(c_white), TextAlign::TOP_LEFT, "#%d  %s", id(tr_number),
+                  id(tr_west) ? "WESTBOUND" : "EASTBOUND");
+        std::string dest = "TO " + id(tr_dest);
+        for (auto &ch : dest) ch = toupper(ch);
+        marquee(x0, xr, 31, id(f8), id(c_white), dest);
+        if ((millis() / 600) % 2 == 0)
+          it.print(x0, 52, id(f8), id(c_red), TextAlign::TOP_LEFT, "PASSING");
+        if (id(tr_late) > 1)
+          it.printf(xr, 52, id(f8), id(c_red), TextAlign::TOP_RIGHT, "%d MIN LATE", id(tr_late));
+        else
+          it.print(xr, 52, id(f8), id(c_green), TextAlign::TOP_RIGHT, "ON TIME");
+        return;
       }
 
       // ---- Plane overhead ----
-      if (id(pl_last_seen) > 0 && !id(pl_flight).empty()) {
+      // HA updates every ~10 s while a plane is overhead; drop it if updates stop.
+      if (id(show_planes).state && id(pl_last_seen) > 0 && ts - id(pl_last_seen) < 45 && !id(pl_flight).empty()) {
         const bool radar = W >= 192;
         const int x0 = radar ? 70 : 2, xr = W - 2;
         if (radar) {
           const int cx = 31, cy = 31;
-          const float scale = 30.0f / id(plane_radius).state;
+          const float scale = 30.0f / id(pl_radius);
           Color ring(0, 70, 30);
           for (int r = 10; r <= 30; r += 10) it.circle(cx, cy, r, ring);
           for (auto &p : id(pl_trail))
@@ -854,8 +572,7 @@ display:
         }
         it.print(x0, 0, id(f16), id(c_amber), TextAlign::TOP_LEFT, id(pl_flight).c_str());
         it.print(xr, 2, id(f8), id(c_amber), TextAlign::TOP_RIGHT, id(pl_type).c_str());
-        const std::string &route = id(pl_route).empty() ? id(pl_reg) : id(pl_route);
-        it.print(x0, 19, id(f16), id(c_white), TextAlign::TOP_LEFT, route.c_str());
+        it.print(x0, 19, id(f16), id(c_white), TextAlign::TOP_LEFT, id(pl_route).c_str());
         int alt = id(pl_alt);
         const char *arrow = id(pl_rate) > 300 ? " ^" : (id(pl_rate) < -300 ? " v" : "");
         if (alt >= 1000)
