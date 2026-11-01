@@ -11,8 +11,8 @@
 #   show_message      line1, line2, seconds
 #   show_timer        label, remaining, duration   (seconds)
 #   clear_timer
-#   show_train        operator, name, number, westbound, dest, late, seconds
-#   show_plane        flight, type, route, airline, altitude, rate, speed,
+#   show_train        company, name, train_number, westbound, dest, late, seconds
+#   show_plane        flight, aircraft, route, airline, altitude, rate, speed,
 #                     track, dx, dy, radius        (dx/dy/radius in miles)
 #   clear_plane
 #   show_now_playing  title, artist, source, art_url
@@ -83,18 +83,18 @@ api:
         - lambda: 'id(timer_end) = 0;'
     - action: show_train
       variables:
-        operator: string
+        company: string
         name: string
-        number: int
+        train_number: int
         westbound: bool
         dest: string
         late: int
         seconds: int
       then:
         - lambda: |-
-            id(tr_operator) = operator;
+            id(tr_operator) = company;
             id(tr_name) = name;
-            id(tr_number) = number;
+            id(tr_number) = train_number;
             id(tr_west) = westbound;
             id(tr_dest) = dest;
             id(tr_late) = late;
@@ -102,7 +102,7 @@ api:
     - action: show_plane
       variables:
         flight: string
-        type: string
+        aircraft: string
         route: string
         airline: string
         altitude: int
@@ -116,7 +116,7 @@ api:
         - lambda: |-
             if (flight != id(pl_flight)) id(pl_trail).clear();
             id(pl_flight) = flight;
-            id(pl_type) = type;
+            id(pl_type) = aircraft;
             id(pl_route) = route;
             id(pl_airline) = airline;
             id(pl_alt) = altitude;
