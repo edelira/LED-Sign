@@ -17,8 +17,16 @@
 #   clear_plane
 #   show_now_playing  title, artist, source, art_url
 #   clear_now_playing
-# Screen priority: timer > message > train passing > plane overhead >
-# now playing > idle (clock + weather).
+#   show_game         game_state (pre/in/post), kickoff, opponent, at_home,
+#                     us_score, opp_score, status, down_text, possession,
+#                     channel, us_color, us_alt, opp_color, opp_alt
+#   clear_game
+#
+# Full-screen moments, in priority order: timer's last minute / TIME'S UP,
+# message, train passing, touchdown, scoreboard after a score, final score,
+# plane overhead. Otherwise the screen is shared: music (or the clock and
+# weather), with a timer bar on top while a timer runs and a Bears strip
+# along the bottom on game day.
 
 substitutions:
   panels: "3"          # panels chained left to right
@@ -169,6 +177,57 @@ api:
     - action: clear_now_playing
       then:
         - lambda: 'id(np_active) = false;'
+    # Bears game (HA, from ESPN). Score changes trigger the touchdown /
+    # scoreboard screens; the end of a game triggers the final-score screen.
+    - action: show_game
+      variables:
+        game_state: string
+        kickoff: string
+        opponent: string
+        at_home: bool
+        us_score: int
+        opp_score: int
+        status: string
+        down_text: string
+        possession: int
+        channel: string
+        us_color: string
+        us_alt: string
+        opp_color: string
+        opp_alt: string
+      then:
+        - lambda: |-
+            const int64_t t = id(sntp_time).now().timestamp;
+            if (game_state == "in" && id(g_state) == "in" && opponent == id(g_opp)) {
+              if (us_score - id(g_us) >= 6) {
+                id(g_td_until) = t + 10;
+                id(g_b1_until) = t + 25;
+              } else if (us_score != id(g_us) || opp_score != id(g_them)) {
+                id(g_b1_until) = t + 15;
+              }
+            }
+            if (game_state == "post" && id(g_state) == "in") id(g_b6_until) = t + 900;
+            id(g_state) = game_state;
+            id(g_kick) = kickoff;
+            id(g_opp) = opponent;
+            id(g_home) = at_home;
+            id(g_us) = us_score;
+            id(g_them) = opp_score;
+            id(g_status) = status;
+            id(g_down) = down_text;
+            id(g_poss) = possession;
+            id(g_channel) = channel;
+            id(g_us_c) = us_color;
+            id(g_us_a) = us_alt;
+            id(g_opp_c) = opp_color;
+            id(g_opp_a) = opp_alt;
+    - action: clear_game
+      then:
+        - lambda: |-
+            id(g_state).clear();
+            id(g_td_until) = 0;
+            id(g_b1_until) = 0;
+            id(g_b6_until) = 0;
 
 ota:
   - platform: esphome
@@ -298,6 +357,48 @@ globals:
   - id: np_art_ok
     type: bool
     initial_value: 'false'
+  # Bears game (pushed from HA)
+  - id: g_state   # "pre", "in", "post", or empty = no game today
+    type: std::string
+  - id: g_kick
+    type: std::string
+  - id: g_opp
+    type: std::string
+  - id: g_home
+    type: bool
+    initial_value: 'true'
+  - id: g_us
+    type: int
+    initial_value: '0'
+  - id: g_them
+    type: int
+    initial_value: '0'
+  - id: g_status
+    type: std::string
+  - id: g_down
+    type: std::string
+  - id: g_poss   # 1 = Bears have the ball, -1 = opponent
+    type: int
+    initial_value: '0'
+  - id: g_channel
+    type: std::string
+  - id: g_us_c
+    type: std::string
+  - id: g_us_a
+    type: std::string
+  - id: g_opp_c
+    type: std::string
+  - id: g_opp_a
+    type: std::string
+  - id: g_td_until
+    type: int64_t
+    initial_value: '0'
+  - id: g_b1_until
+    type: int64_t
+    initial_value: '0'
+  - id: g_b6_until
+    type: int64_t
+    initial_value: '0'
 
 switch:
   - platform: template
@@ -416,6 +517,85 @@ image:
     on_error:
       - lambda: 'id(np_art_ok) = false;'
 
+  # NFL team logos from ESPN, downloaded when the firmware is built: 28 px for
+  # the scoreboard, 13 px for the score strip.
+  - platform: file
+    defaults:
+      type: RGB565
+      transparency: alpha_channel
+      resize: 28x28
+    files:
+      - {id: logo_l_ari, file: "https://a.espncdn.com/i/teamlogos/nfl/500/ari.png"}
+      - {id: logo_l_atl, file: "https://a.espncdn.com/i/teamlogos/nfl/500/atl.png"}
+      - {id: logo_l_bal, file: "https://a.espncdn.com/i/teamlogos/nfl/500/bal.png"}
+      - {id: logo_l_buf, file: "https://a.espncdn.com/i/teamlogos/nfl/500/buf.png"}
+      - {id: logo_l_car, file: "https://a.espncdn.com/i/teamlogos/nfl/500/car.png"}
+      - {id: logo_l_chi, file: "https://a.espncdn.com/i/teamlogos/nfl/500/chi.png"}
+      - {id: logo_l_cin, file: "https://a.espncdn.com/i/teamlogos/nfl/500/cin.png"}
+      - {id: logo_l_cle, file: "https://a.espncdn.com/i/teamlogos/nfl/500/cle.png"}
+      - {id: logo_l_dal, file: "https://a.espncdn.com/i/teamlogos/nfl/500/dal.png"}
+      - {id: logo_l_den, file: "https://a.espncdn.com/i/teamlogos/nfl/500/den.png"}
+      - {id: logo_l_det, file: "https://a.espncdn.com/i/teamlogos/nfl/500/det.png"}
+      - {id: logo_l_gb, file: "https://a.espncdn.com/i/teamlogos/nfl/500/gb.png"}
+      - {id: logo_l_hou, file: "https://a.espncdn.com/i/teamlogos/nfl/500/hou.png"}
+      - {id: logo_l_ind, file: "https://a.espncdn.com/i/teamlogos/nfl/500/ind.png"}
+      - {id: logo_l_jax, file: "https://a.espncdn.com/i/teamlogos/nfl/500/jax.png"}
+      - {id: logo_l_kc, file: "https://a.espncdn.com/i/teamlogos/nfl/500/kc.png"}
+      - {id: logo_l_lv, file: "https://a.espncdn.com/i/teamlogos/nfl/500/lv.png"}
+      - {id: logo_l_lac, file: "https://a.espncdn.com/i/teamlogos/nfl/500/lac.png"}
+      - {id: logo_l_lar, file: "https://a.espncdn.com/i/teamlogos/nfl/500/lar.png"}
+      - {id: logo_l_mia, file: "https://a.espncdn.com/i/teamlogos/nfl/500/mia.png"}
+      - {id: logo_l_min, file: "https://a.espncdn.com/i/teamlogos/nfl/500/min.png"}
+      - {id: logo_l_ne, file: "https://a.espncdn.com/i/teamlogos/nfl/500/ne.png"}
+      - {id: logo_l_no, file: "https://a.espncdn.com/i/teamlogos/nfl/500/no.png"}
+      - {id: logo_l_nyg, file: "https://a.espncdn.com/i/teamlogos/nfl/500/nyg.png"}
+      - {id: logo_l_nyj, file: "https://a.espncdn.com/i/teamlogos/nfl/500/nyj.png"}
+      - {id: logo_l_phi, file: "https://a.espncdn.com/i/teamlogos/nfl/500/phi.png"}
+      - {id: logo_l_pit, file: "https://a.espncdn.com/i/teamlogos/nfl/500/pit.png"}
+      - {id: logo_l_sf, file: "https://a.espncdn.com/i/teamlogos/nfl/500/sf.png"}
+      - {id: logo_l_sea, file: "https://a.espncdn.com/i/teamlogos/nfl/500/sea.png"}
+      - {id: logo_l_tb, file: "https://a.espncdn.com/i/teamlogos/nfl/500/tb.png"}
+      - {id: logo_l_ten, file: "https://a.espncdn.com/i/teamlogos/nfl/500/ten.png"}
+      - {id: logo_l_wsh, file: "https://a.espncdn.com/i/teamlogos/nfl/500/wsh.png"}
+  - platform: file
+    defaults:
+      type: RGB565
+      transparency: alpha_channel
+      resize: 13x13
+    files:
+      - {id: logo_s_ari, file: "https://a.espncdn.com/i/teamlogos/nfl/500/ari.png"}
+      - {id: logo_s_atl, file: "https://a.espncdn.com/i/teamlogos/nfl/500/atl.png"}
+      - {id: logo_s_bal, file: "https://a.espncdn.com/i/teamlogos/nfl/500/bal.png"}
+      - {id: logo_s_buf, file: "https://a.espncdn.com/i/teamlogos/nfl/500/buf.png"}
+      - {id: logo_s_car, file: "https://a.espncdn.com/i/teamlogos/nfl/500/car.png"}
+      - {id: logo_s_chi, file: "https://a.espncdn.com/i/teamlogos/nfl/500/chi.png"}
+      - {id: logo_s_cin, file: "https://a.espncdn.com/i/teamlogos/nfl/500/cin.png"}
+      - {id: logo_s_cle, file: "https://a.espncdn.com/i/teamlogos/nfl/500/cle.png"}
+      - {id: logo_s_dal, file: "https://a.espncdn.com/i/teamlogos/nfl/500/dal.png"}
+      - {id: logo_s_den, file: "https://a.espncdn.com/i/teamlogos/nfl/500/den.png"}
+      - {id: logo_s_det, file: "https://a.espncdn.com/i/teamlogos/nfl/500/det.png"}
+      - {id: logo_s_gb, file: "https://a.espncdn.com/i/teamlogos/nfl/500/gb.png"}
+      - {id: logo_s_hou, file: "https://a.espncdn.com/i/teamlogos/nfl/500/hou.png"}
+      - {id: logo_s_ind, file: "https://a.espncdn.com/i/teamlogos/nfl/500/ind.png"}
+      - {id: logo_s_jax, file: "https://a.espncdn.com/i/teamlogos/nfl/500/jax.png"}
+      - {id: logo_s_kc, file: "https://a.espncdn.com/i/teamlogos/nfl/500/kc.png"}
+      - {id: logo_s_lv, file: "https://a.espncdn.com/i/teamlogos/nfl/500/lv.png"}
+      - {id: logo_s_lac, file: "https://a.espncdn.com/i/teamlogos/nfl/500/lac.png"}
+      - {id: logo_s_lar, file: "https://a.espncdn.com/i/teamlogos/nfl/500/lar.png"}
+      - {id: logo_s_mia, file: "https://a.espncdn.com/i/teamlogos/nfl/500/mia.png"}
+      - {id: logo_s_min, file: "https://a.espncdn.com/i/teamlogos/nfl/500/min.png"}
+      - {id: logo_s_ne, file: "https://a.espncdn.com/i/teamlogos/nfl/500/ne.png"}
+      - {id: logo_s_no, file: "https://a.espncdn.com/i/teamlogos/nfl/500/no.png"}
+      - {id: logo_s_nyg, file: "https://a.espncdn.com/i/teamlogos/nfl/500/nyg.png"}
+      - {id: logo_s_nyj, file: "https://a.espncdn.com/i/teamlogos/nfl/500/nyj.png"}
+      - {id: logo_s_phi, file: "https://a.espncdn.com/i/teamlogos/nfl/500/phi.png"}
+      - {id: logo_s_pit, file: "https://a.espncdn.com/i/teamlogos/nfl/500/pit.png"}
+      - {id: logo_s_sf, file: "https://a.espncdn.com/i/teamlogos/nfl/500/sf.png"}
+      - {id: logo_s_sea, file: "https://a.espncdn.com/i/teamlogos/nfl/500/sea.png"}
+      - {id: logo_s_tb, file: "https://a.espncdn.com/i/teamlogos/nfl/500/tb.png"}
+      - {id: logo_s_ten, file: "https://a.espncdn.com/i/teamlogos/nfl/500/ten.png"}
+      - {id: logo_s_wsh, file: "https://a.espncdn.com/i/teamlogos/nfl/500/wsh.png"}
+
 font:
   - file: "gfonts://Silkscreen"
     id: f8
@@ -508,17 +688,127 @@ display:
         return;
       }
       const int64_t ts = now.timestamp;
+      const bool wide = W >= 192;
+      const Color line_c(35, 30, 25);
 
-      // ---- Timer (highest priority) ----
+      // ---- Helpers ----
+      // Print with y = top of the capital letters (Silkscreen leaves 4/7/13 px
+      // above them at sizes 8/16/32).
+      auto cap = [&](display::BaseFont *f) { return f == id(f8) ? 4 : (f == id(f16) ? 7 : 13); };
+      auto txt = [&](int x, int y, display::BaseFont *f, Color c, TextAlign a, const std::string &s) {
+        it.print(x, y - cap(f), f, c, a, s.c_str());
+      };
+      auto mq = [&](int x0, int x1, int y, display::BaseFont *f, Color c, const std::string &s) {
+        marquee(x0, x1, y - cap(f), f, c, s);
+      };
+      auto text_w = [&](display::BaseFont *f, const std::string &s) {
+        int bx, by, w, h;
+        it.get_text_bounds(0, 0, s.c_str(), f, TextAlign::TOP_LEFT, &bx, &by, &w, &h);
+        return w;
+      };
+      // The font has no real "&", so spell it out.
+      auto and_fix = [](std::string s) {
+        for (size_t p; (p = s.find('&')) != std::string::npos;) s.replace(p, 1, "AND");
+        return s;
+      };
+      // Team colours arrive as ESPN hex strings. Scale them to a peak
+      // brightness so dark navy still shows on LEDs; near-black becomes light
+      // grey for text and stays black for backgrounds.
+      auto hexc = [](const std::string &h, int peak) -> Color {
+        unsigned long v = h.size() >= 6 ? strtoul(h.substr(h.size() - 6).c_str(), nullptr, 16) : 0;
+        int r = (v >> 16) & 255, g = (v >> 8) & 255, b = v & 255, m = std::max(r, std::max(g, b));
+        if (m < 24) return peak > 150 ? Color(200, 200, 200) : Color(0, 0, 0);
+        return Color(r * peak / m, g * peak / m, b * peak / m);
+      };
+      auto logo = [&](const std::string &abbr, bool big) -> image::Image * {
+        struct L { const char *a; image::Image *b, *s; };
+        static const L table[] = {
+          {"ARI", id(logo_l_ari), id(logo_s_ari)},
+          {"ATL", id(logo_l_atl), id(logo_s_atl)},
+          {"BAL", id(logo_l_bal), id(logo_s_bal)},
+          {"BUF", id(logo_l_buf), id(logo_s_buf)},
+          {"CAR", id(logo_l_car), id(logo_s_car)},
+          {"CHI", id(logo_l_chi), id(logo_s_chi)},
+          {"CIN", id(logo_l_cin), id(logo_s_cin)},
+          {"CLE", id(logo_l_cle), id(logo_s_cle)},
+          {"DAL", id(logo_l_dal), id(logo_s_dal)},
+          {"DEN", id(logo_l_den), id(logo_s_den)},
+          {"DET", id(logo_l_det), id(logo_s_det)},
+          {"GB", id(logo_l_gb), id(logo_s_gb)},
+          {"HOU", id(logo_l_hou), id(logo_s_hou)},
+          {"IND", id(logo_l_ind), id(logo_s_ind)},
+          {"JAX", id(logo_l_jax), id(logo_s_jax)},
+          {"KC", id(logo_l_kc), id(logo_s_kc)},
+          {"LV", id(logo_l_lv), id(logo_s_lv)},
+          {"LAC", id(logo_l_lac), id(logo_s_lac)},
+          {"LAR", id(logo_l_lar), id(logo_s_lar)},
+          {"MIA", id(logo_l_mia), id(logo_s_mia)},
+          {"MIN", id(logo_l_min), id(logo_s_min)},
+          {"NE", id(logo_l_ne), id(logo_s_ne)},
+          {"NO", id(logo_l_no), id(logo_s_no)},
+          {"NYG", id(logo_l_nyg), id(logo_s_nyg)},
+          {"NYJ", id(logo_l_nyj), id(logo_s_nyj)},
+          {"PHI", id(logo_l_phi), id(logo_s_phi)},
+          {"PIT", id(logo_l_pit), id(logo_s_pit)},
+          {"SF", id(logo_l_sf), id(logo_s_sf)},
+          {"SEA", id(logo_l_sea), id(logo_s_sea)},
+          {"TB", id(logo_l_tb), id(logo_s_tb)},
+          {"TEN", id(logo_l_ten), id(logo_s_ten)},
+          {"WSH", id(logo_l_wsh), id(logo_s_wsh)}
+        };
+        for (const auto &l : table)
+          if (abbr == l.a) return big ? l.b : l.s;
+        return nullptr;
+      };
+      const int hour12 = now.hour % 12 == 0 ? 12 : now.hour % 12;
+      char hm[8];
+      snprintf(hm, sizeof hm, "%d:%02d", hour12, now.minute);
+      const char *ampm = now.hour < 12 ? "AM" : "PM";
+      const int code = id(wx_code);
+      const bool have_wx = code >= 0 && !std::isnan(id(wx_temp));
+      char temp[8];
+      snprintf(temp, sizeof temp, "%.0fF", id(wx_temp));
+      const Color sun(255, 200, 40), cloud(170, 170, 190);
+      // Weather icon (sun for clear/partly, cloud otherwise, with rain/snow/bolt
+      // marks) centred on cx, drawn oy rows lower than the idle screen's.
+      auto wx_icon = [&](int cx, int oy) {
+        if (code <= 2) it.filled_circle(code == 0 ? cx : cx - 6, 10 + oy, 6, sun);
+        if (code >= 1) {
+          it.filled_circle(cx - 6, 12 + oy, 5, cloud);
+          it.filled_circle(cx + 2, 9 + oy, 7, cloud);
+          it.filled_circle(cx + 9, 13 + oy, 4, cloud);
+          it.filled_rectangle(cx - 6, 13 + oy, 15, 5, cloud);
+        }
+        if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82))
+          for (int i = -6; i <= 6; i += 4) it.line(cx + i, 20 + oy, cx + i - 2, 24 + oy, Color(60, 140, 255));
+        if ((code >= 71 && code <= 77) || code == 85 || code == 86)
+          for (int i = -6; i <= 6; i += 4) it.draw_pixel_at(cx + i, 22 + oy, Color(255, 255, 255));
+        if (code >= 95) it.line(cx + 1, 19 + oy, cx - 2, 25 + oy, sun);
+      };
+      // Small version for the music screen's time line.
+      auto wx_small = [&](int cx, int cy) {
+        if (code <= 2) it.filled_circle(code == 0 ? cx : cx - 3, code == 0 ? cy : cy - 2, code == 0 ? 4 : 3, sun);
+        if (code >= 1) {
+          it.filled_circle(cx - 3, cy + 1, 3, cloud);
+          it.filled_circle(cx + 2, cy - 1, 4, cloud);
+          it.filled_rectangle(cx - 4, cy + 1, 10, 3, cloud);
+        }
+        if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82))
+          for (int i = -3; i <= 3; i += 3) it.draw_pixel_at(cx + i, cy + 6, Color(60, 140, 255));
+        if ((code >= 71 && code <= 77) || code == 85 || code == 86)
+          for (int i = -3; i <= 3; i += 3) it.draw_pixel_at(cx + i, cy + 6, Color(255, 255, 255));
+      };
+
+      // ---- Timer: a bar along the top of the shared screen, then full
+      // screen for the last minute and TIME'S UP ----
+      bool tbar = false;
       if (id(timer_end) > 0) {
         int64_t rem = id(timer_end) - ts;
-        if (rem > 0) {
+        if (rem > 60) {
+          tbar = true;
+        } else if (rem > 0) {
           it.print(W / 2, 0, id(f16), id(c_red), TextAlign::TOP_CENTER, id(timer_label).c_str());
-          int h = rem / 3600, m = (rem % 3600) / 60, s = rem % 60;
-          if (h > 0)
-            it.printf(W / 2, 36, id(f32), id(c_amber), TextAlign::CENTER, "%d:%02d:%02d", h, m, s);
-          else
-            it.printf(W / 2, 36, id(f32), id(c_amber), TextAlign::CENTER, "%d:%02d", m, s);
+          it.printf(W / 2, 36, id(f32), id(c_amber), TextAlign::CENTER, "%d:%02d", (int) (rem / 60), (int) (rem % 60));
           if (id(timer_duration) > 0) {
             int bar = W - 32;
             int done = bar * (id(timer_duration) - rem) / id(timer_duration);
@@ -526,16 +816,16 @@ display:
             it.filled_rectangle(16, 60, done, 3, id(c_amber));
           }
           return;
-        }
-        if (rem > -60) {
+        } else if (rem > -60) {
           // Flash "TIME'S UP" for a minute, then fall through to the next screen.
           if ((millis() / 500) % 2 == 0) {
             it.print(W / 2, 14, id(f16), id(c_red), TextAlign::TOP_CENTER, id(timer_label).c_str());
             it.print(W / 2, 40, id(f16), id(c_red), TextAlign::CENTER, "TIME'S UP");
           }
           return;
+        } else {
+          id(timer_end) = 0;
         }
-        id(timer_end) = 0;
       }
 
       // ---- Message from Home Assistant ----
@@ -652,6 +942,62 @@ display:
         return;
       }
 
+      // ---- Bears: touchdown, scoreboard after a score, final score ----
+      if (wide && !id(g_state).empty()) {
+        const Color usbg = hexc(id(g_us_c), 110), usfg = hexc(id(g_us_a), 255);
+        const Color opbg = hexc(id(g_opp_c), 110), opfg = hexc(id(g_opp_a), 255);
+        const std::string us_s = std::to_string(id(g_us)), op_s = std::to_string(id(g_them));
+        if (id(g_td_until) > ts) {
+          it.filled_rectangle(0, 0, W, 64, usbg);
+          const int o = (millis() / 120) % 8;   // marching stripes
+          for (int x = o; x + 4 <= W; x += 8) {
+            it.filled_rectangle(x, 0, 4, 3, usfg);
+            if (W - x - 4 >= 0) it.filled_rectangle(W - x - 4, 61, 4, 3, usfg);
+          }
+          txt(W / 2, 7, id(f16), usfg, TextAlign::TOP_CENTER, "TOUCHDOWN BEARS!");
+          txt(W / 2, 26, id(f32), id(c_white), TextAlign::TOP_CENTER, us_s + "-" + op_s);
+          return;
+        }
+        if (id(g_b1_until) > ts && id(g_state) == "in") {
+          auto team = [&](int x, const std::string &abbr, Color bg, Color fg) {
+            if (auto *img = logo(abbr, true)) {
+              it.image(x, 1, img);
+            } else {
+              it.filled_circle(x + 14, 15, 14, bg);
+              txt(x + 14, 13, id(f8), fg, TextAlign::TOP_CENTER, abbr);
+            }
+          };
+          team(2, "CHI", usbg, usfg);
+          team(162, id(g_opp), opbg, opfg);
+          txt(36, 6, id(f16), usfg, TextAlign::TOP_LEFT, us_s);
+          txt(156, 6, id(f16), opfg, TextAlign::TOP_RIGHT, op_s);
+          if (id(g_poss) != 0) it.filled_circle(id(g_poss) > 0 ? 49 : 143, 25, 2, id(c_white));
+          // Status like "Q3 8:42": quarter above the clock.
+          const std::string &st = id(g_status);
+          const size_t sp = st.find(' ');
+          txt(W / 2, 6, id(f8), id(c_dim), TextAlign::TOP_CENTER, st.substr(0, sp));
+          if (sp != std::string::npos) txt(W / 2, 16, id(f8), id(c_white), TextAlign::TOP_CENTER, st.substr(sp + 1));
+          txt(W / 2, 36, id(f8), id(c_amber), TextAlign::TOP_CENTER, and_fix(id(g_down)));
+          it.horizontal_line(0, 51, W, line_c);
+          txt(2, 55, id(f8), id(c_amber), TextAlign::TOP_LEFT, std::string(hm) + " " + ampm);
+          if (have_wx) txt(W - 2, 55, id(f8), id(c_white), TextAlign::TOP_RIGHT, temp);
+          return;
+        }
+        if (id(g_b6_until) > ts && id(g_state) == "post") {
+          txt(W / 2, 2, id(f8), id(c_dim), TextAlign::TOP_CENTER, id(g_status));
+          it.filled_rectangle(0, 14, 94, 26, usbg);
+          it.filled_rectangle(98, 14, 94, 26, opbg);
+          txt(3, 22, id(f16), usfg, TextAlign::TOP_LEFT, "CHI");
+          txt(91, 22, id(f16), usfg, TextAlign::TOP_RIGHT, us_s);
+          txt(101, 22, id(f16), opfg, TextAlign::TOP_LEFT, id(g_opp));
+          txt(189, 22, id(f16), opfg, TextAlign::TOP_RIGHT, op_s);
+          const int d = id(g_us) - id(g_them);
+          txt(W / 2, 48, id(f8), d > 0 ? id(c_green) : (d < 0 ? id(c_red) : id(c_white)), TextAlign::TOP_CENTER,
+              d > 0 ? "BEARS WIN" : (d < 0 ? "BEARS LOSE" : "TIE GAME"));
+          return;
+        }
+      }
+
       // ---- Plane overhead ----
       // HA updates every ~10 s while a plane is overhead; drop it if updates stop.
       if (id(show_planes).state && id(pl_last_seen) > 0 && ts - id(pl_last_seen) < 45 && !id(pl_flight).empty()) {
@@ -677,7 +1023,8 @@ display:
           it.line(px, py, px + (int) (5 * sinf(tr)), py - (int) (5 * cosf(tr)), id(c_amber));
           it.filled_rectangle(px - 1, py - 1, 3, 3, id(c_amber));
           it.filled_rectangle(cx - 1, cy - 1, 3, 3, Color(40, 230, 80));   // home
-          it.print(1, 63, id(f8), id(c_dim), TextAlign::BOTTOM_LEFT, "N");
+          it.filled_rectangle(27, 0, 9, 7, Color(0, 0, 0));   // north is up (sign on the north wall)
+          it.print(31, -3, id(f8), id(c_dim), TextAlign::TOP_CENTER, "N");
           it.end_clipping();
           for (int y = 0; y < 64; y += 2) it.draw_pixel_at(64, y, id(c_gray));
         }
@@ -697,9 +1044,59 @@ display:
         return;
       }
 
-      // ---- Now playing (kitchen) ----
-      if (id(np_active)) {
-        const bool wide = W >= 192;
+      // ---- Shared screen: music (or clock + weather), with a timer bar on
+      // top while a timer runs and a Bears strip along the bottom on game day ----
+      const bool music = id(np_active);
+      const std::string &gs = id(g_state);
+      // Pre-game goes in the weather spot on the clock screen, in the strip otherwise.
+      const bool strip = wide && !gs.empty() && (gs != "pre" || music);
+      const int ox = (music && wide) ? 64 : 0;   // music keeps the album art panel whole
+      const int top = tbar ? 16 : 0, bot = strip ? 51 : 64;
+
+      if (tbar) {
+        const int64_t rem = id(timer_end) - ts;
+        const int bw = W - ox;
+        it.filled_rectangle(ox, 0, bw, 15, Color(60, 35, 0));
+        if (id(timer_duration) > 0) {
+          int done = bw * (id(timer_duration) - rem) / id(timer_duration);
+          it.filled_rectangle(ox, 13, std::max(0, std::min(done, bw)), 2, id(c_amber));
+        }
+        txt(ox + 3, 3, id(f8), id(c_amber), TextAlign::TOP_LEFT, id(timer_label));
+        char tl[12];
+        if (rem >= 3600)
+          snprintf(tl, sizeof tl, "%d:%02d:%02d", (int) (rem / 3600), (int) (rem % 3600 / 60), (int) (rem % 60));
+        else
+          snprintf(tl, sizeof tl, "%d:%02d", (int) (rem / 60), (int) (rem % 60));
+        txt(W - 3, 3, id(f8), id(c_amber), TextAlign::TOP_RIGHT, tl);
+      }
+
+      if (strip) {
+        const int sw = W - ox, y = 51;
+        const bool roomy = sw >= 192;
+        const int mid = ox + (roomy ? 80 : sw / 2);
+        const Color usbg = hexc(id(g_us_c), 110), usfg = hexc(id(g_us_a), 255);
+        const Color opbg = hexc(id(g_opp_c), 110), opfg = hexc(id(g_opp_a), 255);
+        if (gs == "pre") {
+          it.filled_rectangle(ox, y, sw, 13, usbg);
+          txt(ox + sw / 2, y + 4, id(f8), usfg, TextAlign::TOP_CENTER,
+              std::string("BEARS ") + (id(g_home) ? "VS " : "AT ") + id(g_opp) + " " + id(g_kick));
+        } else {
+          it.filled_rectangle(ox, y, mid - ox, 13, usbg);
+          it.filled_rectangle(mid, y, W - mid, 13, opbg);
+          int lx = ox + 3, rx = mid + 3;
+          if (roomy) {
+            if (auto *l = logo("CHI", false)) { it.image(ox + 2, y, l); lx = ox + 18; }
+            if (auto *l = logo(id(g_opp), false)) { it.image(mid + 2, y, l); rx = mid + 18; }
+          }
+          txt(lx, y + 4, id(f8), usfg, TextAlign::TOP_LEFT, "CHI " + std::to_string(id(g_us)));
+          txt(rx, y + 4, id(f8), opfg, TextAlign::TOP_LEFT, id(g_opp) + " " + std::to_string(id(g_them)));
+          std::string st = gs == "post" ? std::string(roomy ? "FINAL" : "F") : id(g_status);
+          if (!roomy) st = st.substr(0, st.find(' '));
+          txt(W - 3, y + 4, id(f8), id(c_white), TextAlign::TOP_RIGHT, st);
+        }
+      }
+
+      if (music) {
         const int x0 = wide ? 70 : 2, xr = W - 2;
         if (wide) {
           if (id(np_art_ok)) {
@@ -713,45 +1110,74 @@ display:
             it.filled_rectangle(29, 12, 21, 5, id(c_amber));
           }
         }
-        it.print(x0, 2, id(f8), id(c_dim), TextAlign::TOP_LEFT, "NOW PLAYING");
-        it.print(xr, 2, id(f8), id(c_dim), TextAlign::TOP_RIGHT, id(np_source).c_str());
-        marquee(x0, xr, 17, id(f16), id(c_amber), id(np_title));
-        marquee(x0, xr, 40, id(f8), id(c_white), id(np_artist));
+        const std::string title = and_fix(id(np_title)), artist = and_fix(id(np_artist));
+        if (!tbar && !strip) {
+          // Title, artist, then a big time and the weather.
+          mq(x0, xr, 4, id(f16), id(c_amber), title);
+          mq(x0, xr, 23, id(f8), id(c_white), artist);
+          it.horizontal_line(x0 - 4, 35, xr - x0 + 6, line_c);
+          txt(x0, 40, id(f16), id(c_amber), TextAlign::TOP_LEFT, hm);
+          txt(x0 + text_w(id(f16), hm) + 5, 40, id(f8), id(c_dim), TextAlign::TOP_LEFT, ampm);
+          if (have_wx) {
+            txt(xr, 40, id(f16), id(c_white), TextAlign::TOP_RIGHT, temp);
+            wx_small(xr - text_w(id(f16), temp) - 10, 45);
+          }
+        } else {
+          const int ty = top + (tbar ? 3 : 4);
+          mq(x0, xr, ty, id(f16), id(c_amber), title);
+          mq(x0, xr, ty + 19, id(f8), id(c_white), artist);
+          if (!(tbar && strip)) {   // no room for the time when both bars are up
+            const int yl = tbar ? 53 : 37;
+            if (tbar) it.horizontal_line(x0 - 4, 49, xr - x0 + 6, line_c);
+            txt(x0, yl, id(f8), id(c_amber), TextAlign::TOP_LEFT, std::string(hm) + " " + ampm);
+            if (have_wx)
+              txt(xr, yl, id(f8), id(c_white), TextAlign::TOP_RIGHT, std::string(temp) + " " + id(wx_label));
+          }
+        }
         return;
       }
 
-      // ---- Idle: clock + weather ----
-      const bool wide = W >= 192;
+      // Clock on the first two panels.
       const int clock_w = wide ? 128 : W;
-      int hour12 = now.hour % 12 == 0 ? 12 : now.hour % 12;
-      it.printf(clock_w / 2 - 6, 26, id(f32), id(c_amber), TextAlign::CENTER, "%d:%02d", hour12, now.minute);
-      it.print(clock_w - 2, 8, id(f8), id(c_dim), TextAlign::TOP_RIGHT, now.hour < 12 ? "AM" : "PM");
-      it.strftime(clock_w / 2, 54, id(f8), id(c_dim), TextAlign::CENTER, "%a %b %d", now);
+      if (!tbar && !strip) {
+        it.printf(clock_w / 2 - 6, 26, id(f32), id(c_amber), TextAlign::CENTER, "%s", hm);
+        it.print(clock_w - 2, 8, id(f8), id(c_dim), TextAlign::TOP_RIGHT, ampm);
+        it.strftime(clock_w / 2, 54, id(f8), id(c_dim), TextAlign::CENTER, "%a %b %d", now);
+      } else {
+        const int ctop = top + (tbar ? 4 : 8);
+        txt(clock_w / 2 - 6, ctop, id(f32), id(c_amber), TextAlign::TOP_CENTER, hm);
+        txt(clock_w - 2, top + 3, id(f8), id(c_dim), TextAlign::TOP_RIGHT, ampm);
+        if (bot - top >= 48)
+          txt(clock_w / 2, ctop + 30, id(f8), id(c_dim), TextAlign::TOP_CENTER, now.strftime("%a %b %d"));
+      }
       if (!wide) return;
 
-      // Weather column on the third panel.
+      // Third panel: kickoff on game day before the game, otherwise the weather.
       const int cx = 160;
-      int code = id(wx_code);
-      if (code < 0 || std::isnan(id(wx_temp))) {
-        it.print(cx, 32, id(f8), id(c_dim), TextAlign::CENTER, "NO WX");
+      if (gs == "pre") {
+        it.filled_rectangle(129, top, W - 129, bot - top, hexc(id(g_us_c), 60));
+        const int t0 = top + (tbar ? 3 : 4);
+        txt(cx, t0, id(f8), hexc(id(g_us_a), 255), TextAlign::TOP_CENTER, id(g_home) ? "BEARS VS" : "BEARS AT");
+        txt(cx, t0 + 11, id(f16), id(c_white), TextAlign::TOP_CENTER, id(g_opp));
+        txt(cx, t0 + (tbar ? 27 : 32), id(f8), id(c_amber), TextAlign::TOP_CENTER, id(g_kick));
+        if (!tbar) txt(cx, 50, id(f8), id(c_dim), TextAlign::TOP_CENTER, id(g_channel));
         return;
       }
-      const char *label = id(wx_label).c_str();
-      // Icon: sun for clear/partly, cloud for the rest, with rain/snow/bolt marks.
-      Color sun(255, 200, 40), cloud(170, 170, 190);
-      if (code <= 2) it.filled_circle(code == 0 ? cx : cx - 6, 10, 6, sun);
-      if (code >= 1) {
-        it.filled_circle(cx - 6, 12, 5, cloud);
-        it.filled_circle(cx + 2, 9, 7, cloud);
-        it.filled_circle(cx + 9, 13, 4, cloud);
-        it.filled_rectangle(cx - 6, 13, 15, 5, cloud);
+      if (!have_wx) {
+        it.print(cx, (top + bot) / 2, id(f8), id(c_dim), TextAlign::CENTER, "NO WX");
+        return;
       }
-      if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82))
-        for (int i = -6; i <= 6; i += 4) it.line(cx + i, 20, cx + i - 2, 24, Color(60, 140, 255));
-      if ((code >= 71 && code <= 77) || code == 85 || code == 86)
-        for (int i = -6; i <= 6; i += 4) it.draw_pixel_at(cx + i, 22, Color(255, 255, 255));
-      if (code >= 95) it.line(cx + 1, 19, cx - 2, 25, sun);
-      it.printf(cx, 38, id(f16), id(c_white), TextAlign::CENTER, "%.0fF", id(wx_temp));
-      it.print(cx, 51, id(f8), id(c_white), TextAlign::CENTER, label);
-      if (!std::isnan(id(wx_hi)))
-        it.printf(cx, 60, id(f8), id(c_dim), TextAlign::CENTER, "%.0f/%.0f", id(wx_hi), id(wx_lo));
+      if (!tbar && !strip) {
+        wx_icon(cx, 0);
+        it.printf(cx, 38, id(f16), id(c_white), TextAlign::CENTER, "%s", temp);
+        it.print(cx, 51, id(f8), id(c_white), TextAlign::CENTER, id(wx_label).c_str());
+        if (!std::isnan(id(wx_hi)))
+          it.printf(cx, 60, id(f8), id(c_dim), TextAlign::CENTER, "%.0f/%.0f", id(wx_hi), id(wx_lo));
+      } else if (bot - top >= 48) {
+        wx_icon(cx, top);
+        txt(cx, top + 22, id(f16), id(c_white), TextAlign::TOP_CENTER, temp);
+        txt(cx, top + 38, id(f8), id(c_white), TextAlign::TOP_CENTER, id(wx_label));
+      } else {
+        txt(cx, top + 4, id(f16), id(c_white), TextAlign::TOP_CENTER, temp);
+        txt(cx, top + 22, id(f8), id(c_white), TextAlign::TOP_CENTER, id(wx_label));
+      }
