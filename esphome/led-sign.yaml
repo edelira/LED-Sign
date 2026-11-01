@@ -1100,7 +1100,8 @@ display:
         const int x0 = wide ? 70 : 2, xr = W - 2;
         if (wide) {
           if (id(np_art_ok)) {
-            it.image(0, 0, id(album_art));
+            // Centre covers that aren't square (video thumbnails come in 16:9).
+            it.image((64 - id(album_art)->get_width()) / 2, (64 - id(album_art)->get_height()) / 2, id(album_art));
           } else {
             // Music note placeholder while the album art loads (or if there is none).
             it.filled_circle(24, 42, 7, id(c_amber));
