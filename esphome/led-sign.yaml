@@ -133,6 +133,7 @@ api:
             id(pl_trail).push_back({dx, dy});
             if (id(pl_trail).size() > 8) id(pl_trail).erase(id(pl_trail).begin());
             id(pl_last_seen) = id(sntp_time).now().timestamp;
+            id(pl_ms) = millis();
     - action: clear_plane
       then:
         - lambda: |-
@@ -254,6 +255,9 @@ globals:
     initial_value: '1.5'
   - id: pl_last_seen
     type: int64_t
+    initial_value: '0'
+  - id: pl_ms          # millis() of the last position, for gliding between updates
+    type: uint32_t
     initial_value: '0'
   - id: pl_trail
     type: std::vector<std::pair<float, float>>
@@ -651,21 +655,30 @@ display:
       // ---- Plane overhead ----
       // HA updates every ~10 s while a plane is overhead; drop it if updates stop.
       if (id(show_planes).state && id(pl_last_seen) > 0 && ts - id(pl_last_seen) < 45 && !id(pl_flight).empty()) {
+        // HA sends a position every ~10 s. In between, move the plane along its
+        // heading at its ground speed (knots -> statute miles per second), for at
+        // most 15 s so a lost update doesn't send it off the screen.
+        const float dt = std::min((millis() - id(pl_ms)) / 1000.0f, 15.0f);
+        const float mps = id(pl_gs) * 1.15078f / 3600.0f;
+        const float trk = id(pl_track) * M_PI / 180.0f;
+        const float pdx = id(pl_dx) + mps * dt * sinf(trk), pdy = id(pl_dy) + mps * dt * cosf(trk);
         const bool radar = W >= 192;
         const int x0 = radar ? 70 : 2, xr = W - 2;
         if (radar) {
           const int cx = 31, cy = 31;
           const float scale = 30.0f / id(pl_radius);
+          it.start_clipping(0, 0, 63, 64);   // keep a gliding plane off the text
           Color ring(0, 70, 30);
           for (int r = 10; r <= 30; r += 10) it.circle(cx, cy, r, ring);
           for (auto &p : id(pl_trail))
             it.draw_pixel_at(cx + (int) (p.first * scale), cy - (int) (p.second * scale), Color(90, 90, 40));
-          int px = cx + (int) (id(pl_dx) * scale), py = cy - (int) (id(pl_dy) * scale);
+          int px = cx + lroundf(pdx * scale), py = cy - lroundf(pdy * scale);
           float tr = id(pl_track) * M_PI / 180.0f;
           it.line(px, py, px + (int) (5 * sinf(tr)), py - (int) (5 * cosf(tr)), id(c_amber));
           it.filled_rectangle(px - 1, py - 1, 3, 3, id(c_amber));
           it.filled_rectangle(cx - 1, cy - 1, 3, 3, Color(40, 230, 80));   // home
           it.print(1, 63, id(f8), id(c_dim), TextAlign::BOTTOM_LEFT, "N");
+          it.end_clipping();
           for (int y = 0; y < 64; y += 2) it.draw_pixel_at(64, y, id(c_gray));
         }
         it.print(x0, 0, id(f16), id(c_amber), TextAlign::TOP_LEFT, id(pl_flight).c_str());
@@ -679,7 +692,7 @@ display:
           it.printf(x0, 40, id(f8), id(c_cyan), TextAlign::TOP_LEFT, "%d FT%s", alt, arrow);
         it.printf(xr, 40, id(f8), id(c_cyan), TextAlign::TOP_RIGHT, "%.0f KT", id(pl_gs));
         it.print(x0, 52, id(f8), id(c_dim), TextAlign::TOP_LEFT, id(pl_airline).c_str());
-        float d = sqrtf(id(pl_dx) * id(pl_dx) + id(pl_dy) * id(pl_dy));
+        float d = sqrtf(pdx * pdx + pdy * pdy);
         it.printf(xr, 52, id(f8), id(c_dim), TextAlign::TOP_RIGHT, "%.1f MI", d);
         return;
       }
