@@ -611,17 +611,20 @@ sensor:
       name: "Free memory"
   # Weather from Home Assistant
   - platform: homeassistant
+    id: ha_wx_temp
     entity_id: weather.forecast_home
     attribute: temperature
     internal: true
     on_value:
       - lambda: 'id(wx_temp) = x;'
   - platform: homeassistant
+    id: ha_wx_hi
     entity_id: sensor.led_sign_today_high
     internal: true
     on_value:
       - lambda: 'id(wx_hi) = x;'
   - platform: homeassistant
+    id: ha_wx_lo
     entity_id: sensor.led_sign_today_low
     internal: true
     on_value:
@@ -629,6 +632,7 @@ sensor:
 
 text_sensor:
   - platform: homeassistant
+    id: ha_wx_condition
     entity_id: weather.forecast_home
     internal: true
     on_value:
