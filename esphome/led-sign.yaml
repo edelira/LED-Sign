@@ -458,9 +458,11 @@ display:
     brightness: 100
     double_buffer: true
     update_interval: 80ms   # fast enough for smooth text scrolling
-    # Panels use FM6124 driver chips; the generic driver leaves faint green
-    # streaks below bright pixels.
-    shift_driver: FM6124
+    # Faint green streaks below bright pixels are "ghosting": the next row's
+    # data shows while the row address changes. Blanking the output a little
+    # longer around each latch hides it. (shift_driver: FM6124 left the DMA
+    # uninitialised on this board, so the display stayed dark.)
+    latch_blanking: 2
     lambda: |-
       const int W = it.get_width();
       auto now = id(sntp_time).now();
