@@ -4,8 +4,10 @@
 # the Matrix Portal's screw terminals empty while it's on USB-C.
 #
 # The sign runs its own logic: clock (network time, with Home Assistant as a
-# backup) and weather (Open-Meteo) are fetched on the device. Home Assistant
-# only controls it and pushes things that live in HA, through these actions:
+# backup), trains and planes are fetched on the device. Weather comes from
+# Home Assistant (weather.forecast_home plus the "LED Sign today high/low"
+# template sensors). HA controls the sign and pushes things that live in HA,
+# through these actions:
 #   esphome.led_sign_show_message  line1, line2, seconds
 #   esphome.led_sign_show_timer    label, remaining, duration   (seconds)
 #   esphome.led_sign_clear_timer
@@ -26,8 +28,6 @@
 
 substitutions:
   panels: "3"          # panels chained left to right
-  latitude: "41.83"    # weather location (city level is enough)
-  longitude: "-87.81"
   home_lat: "41.83"    # exact home position for "overhead" (set precisely in ESPHome)
   home_lon: "-87.81"
   yard_mp: "10.1"      # house position, BNSF miles from Chicago Union Station
@@ -127,9 +127,6 @@ ota:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
-  on_connect:
-    - delay: 5s
-    - script.execute: fetch_weather
 
 # Both sources set the same system clock, so the sign keeps time if either the
 # internet (NTP) or Home Assistant is down.
@@ -158,9 +155,11 @@ globals:
   - id: wx_lo
     type: float
     initial_value: 'NAN'
-  - id: wx_code
+  - id: wx_code        # WMO-style code that picks the icon, -1 = no weather yet
     type: int
     initial_value: '-1'
+  - id: wx_label
+    type: std::string
   - id: msg_line1
     type: std::string
   - id: msg_line2
@@ -261,36 +260,6 @@ globals:
     initial_value: '0'
 
 script:
-  - id: fetch_weather
-    mode: single
-    then:
-      - http_request.get:
-          url: "https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min&temperature_unit=fahrenheit&timezone=America%2FChicago&forecast_days=1"
-          capture_response: true
-          max_response_buffer_size: 4096
-          on_response:
-            then:
-              - if:
-                  condition:
-                    lambda: 'return response->status_code == 200;'
-                  then:
-                    - lambda: |-
-                        json::parse_json(body, [](JsonObject root) -> bool {
-                          id(wx_temp) = root["current"]["temperature_2m"].as<float>();
-                          id(wx_code) = root["current"]["weather_code"].as<int>();
-                          id(wx_hi) = root["daily"]["temperature_2m_max"][0].as<float>();
-                          id(wx_lo) = root["daily"]["temperature_2m_min"][0].as<float>();
-                          return true;
-                        });
-                  else:
-                    - logger.log:
-                        format: "Weather request failed: HTTP %d"
-                        args: ['response->status_code']
-          on_error:
-            then:
-              - logger.log: "Weather request failed"
-              - lambda: 'id(net_pause_until) = millis() + 120000;'
-
   - id: fetch_planes
     mode: single
     then:
@@ -522,20 +491,6 @@ interval:
               - lambda: 'return id(sntp_time).now().is_valid() && (int32_t) (millis() - id(net_pause_until)) >= 0;'
           then:
             - script.execute: fetch_amtrak
-      - if:
-          condition:
-            and:
-              - wifi.connected:
-              - lambda: 'return id(wx_code) < 0 && (int32_t) (millis() - id(net_pause_until)) >= 0;'
-          then:
-            - script.execute: fetch_weather   # no weather yet (e.g. first try failed)
-  - interval: 15min
-    then:
-      - if:
-          condition:
-            lambda: 'return (int32_t) (millis() - id(net_pause_until)) >= 0;'
-          then:
-            - script.execute: fetch_weather
   - interval: 10s
     then:
       - if:
@@ -654,8 +609,45 @@ sensor:
   - platform: debug
     free:
       name: "Free memory"
+  # Weather from Home Assistant
+  - platform: homeassistant
+    entity_id: weather.forecast_home
+    attribute: temperature
+    internal: true
+    on_value:
+      - lambda: 'id(wx_temp) = x;'
+  - platform: homeassistant
+    entity_id: sensor.led_sign_today_high
+    internal: true
+    on_value:
+      - lambda: 'id(wx_hi) = x;'
+  - platform: homeassistant
+    entity_id: sensor.led_sign_today_low
+    internal: true
+    on_value:
+      - lambda: 'id(wx_lo) = x;'
 
 text_sensor:
+  - platform: homeassistant
+    entity_id: weather.forecast_home
+    internal: true
+    on_value:
+      - lambda: |-
+          // HA weather condition -> label and icon code (codes follow the WMO
+          // numbering the icon drawing uses).
+          struct Wx { const char *ha, *label; int code; };
+          static const Wx table[] = {
+            {"sunny", "SUNNY", 0}, {"clear-night", "CLEAR", 0},
+            {"partlycloudy", "PARTLY", 2}, {"cloudy", "CLOUDY", 3},
+            {"fog", "FOG", 45}, {"rainy", "RAIN", 61}, {"pouring", "POURING", 65},
+            {"snowy", "SNOW", 71}, {"snowy-rainy", "SLEET", 67}, {"hail", "HAIL", 96},
+            {"lightning", "STORM", 95}, {"lightning-rainy", "STORM", 95},
+            {"windy", "WINDY", 3}, {"windy-variant", "WINDY", 3},
+            {"exceptional", "ALERT", 3},
+          };
+          id(wx_code) = -1;
+          for (const auto &w : table)
+            if (x == w.ha) { id(wx_label) = w.label; id(wx_code) = w.code; break; }
   - platform: debug
     reset_reason:
       name: "Last restart reason"
@@ -913,17 +905,7 @@ display:
         it.print(cx, 32, id(f8), id(c_dim), TextAlign::CENTER, "NO WX");
         return;
       }
-      const char *label;
-      if (code == 0) label = "CLEAR";
-      else if (code <= 2) label = "PARTLY";
-      else if (code == 3) label = "CLOUDY";
-      else if (code <= 48) label = "FOG";
-      else if (code <= 57) label = "DRIZZLE";
-      else if (code <= 67) label = "RAIN";
-      else if (code <= 77) label = "SNOW";
-      else if (code <= 82) label = "SHOWERS";
-      else if (code <= 86) label = "SNOW";
-      else label = "STORM";
+      const char *label = id(wx_label).c_str();
       // Icon: sun for clear/partly, cloud for the rest, with rain/snow/bolt marks.
       Color sun(255, 200, 40), cloud(170, 170, 190);
       if (code <= 2) it.filled_circle(code == 0 ? cx : cx - 6, 10, 6, sun);
