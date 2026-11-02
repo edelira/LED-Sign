@@ -30,6 +30,9 @@
 
 substitutions:
   panels: "3"          # panels chained left to right
+  # Compass bearing the sign faces (straight up on the radar). The kitchen's
+  # back wall faces north-northwest, ~16 degrees west of north.
+  radar_heading: "344"
 
 esphome:
   name: led-sign
@@ -1013,18 +1016,31 @@ display:
         if (radar) {
           const int cx = 31, cy = 31;
           const float scale = 30.0f / id(pl_radius);
+          // Turn the map so "up" is the direction the sign faces.
+          const float hd = ${radar_heading} * M_PI / 180.0f;
+          auto to_screen = [&](float east, float north, int &sx, int &sy) {
+            const float right = east * cosf(hd) - north * sinf(hd);
+            const float ahead = east * sinf(hd) + north * cosf(hd);
+            sx = cx + lroundf(right * scale);
+            sy = cy - lroundf(ahead * scale);
+          };
           it.start_clipping(0, 0, 63, 64);   // keep a gliding plane off the text
           Color ring(0, 70, 30);
           for (int r = 10; r <= 30; r += 10) it.circle(cx, cy, r, ring);
-          for (auto &p : id(pl_trail))
-            it.draw_pixel_at(cx + (int) (p.first * scale), cy - (int) (p.second * scale), Color(90, 90, 40));
-          int px = cx + lroundf(pdx * scale), py = cy - lroundf(pdy * scale);
-          float tr = id(pl_track) * M_PI / 180.0f;
+          int px, py;
+          for (auto &p : id(pl_trail)) {
+            to_screen(p.first, p.second, px, py);
+            it.draw_pixel_at(px, py, Color(90, 90, 40));
+          }
+          to_screen(pdx, pdy, px, py);
+          float tr = id(pl_track) * M_PI / 180.0f - hd;
           it.line(px, py, px + (int) (5 * sinf(tr)), py - (int) (5 * cosf(tr)), id(c_amber));
           it.filled_rectangle(px - 1, py - 1, 3, 3, id(c_amber));
           it.filled_rectangle(cx - 1, cy - 1, 3, 3, Color(40, 230, 80));   // home
-          it.filled_rectangle(27, 0, 9, 7, Color(0, 0, 0));   // north is up (sign on the north wall)
-          it.print(31, -3, id(f8), id(c_dim), TextAlign::TOP_CENTER, "N");
+          // "N" on the outer ring, where north really is.
+          const int nx = cx + lroundf(27 * sinf(-hd)), ny = cy - lroundf(27 * cosf(-hd));
+          it.filled_rectangle(nx - 4, ny - 4, 9, 8, Color(0, 0, 0));
+          it.print(nx, ny - 7, id(f8), id(c_dim), TextAlign::TOP_CENTER, "N");
           it.end_clipping();
           for (int y = 0; y < 64; y += 2) it.draw_pixel_at(64, y, id(c_gray));
         }
