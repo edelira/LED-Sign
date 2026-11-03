@@ -26,7 +26,7 @@
 # message, train passing, touchdown, scoreboard after a score, final score,
 # plane overhead. Otherwise the screen is shared: music (or the clock and
 # weather), with a timer bar on top while a timer runs and a Bears strip
-# along the bottom on game day.
+# along the bottom during the game.
 
 substitutions:
   panels: "3"          # panels chained left to right
@@ -1107,7 +1107,8 @@ display:
       const bool music = id(np_active);
       const std::string &gs = id(g_state);
       // Pre-game goes in the weather spot on the clock screen, in the strip otherwise.
-      const bool strip = wide && !gs.empty() && (gs != "pre" || music);
+      // After the game, only the 15-minute final-score screen; no strip.
+      const bool strip = wide && !gs.empty() && (gs != "pre" || music) && gs != "post";
       const int ox = (music && wide) ? 64 : 0;   // music keeps the album art panel whole
       const int top = tbar ? 16 : 0, bot = strip ? 51 : 64;
 
