@@ -270,6 +270,11 @@ globals:
     initial_value: '-1'
   - id: wx_label
     type: std::string
+  - id: tm_code        # tomorrow's icon code, -1 = not known yet
+    type: int
+    initial_value: '-1'
+  - id: tm_label
+    type: std::string
   - id: msg_line1
     type: std::string
   - id: msg_line2
@@ -479,6 +484,15 @@ sensor:
     internal: true
     on_value:
       - lambda: 'id(wx_lo) = x;'
+  # Tomorrow's forecast (evening card)
+  - platform: homeassistant
+    id: ha_tm_hi
+    entity_id: sensor.led_sign_tomorrow_high
+    internal: true
+  - platform: homeassistant
+    id: ha_tm_lo
+    entity_id: sensor.led_sign_tomorrow_low
+    internal: true
 
 text_sensor:
   - platform: homeassistant
@@ -502,9 +516,37 @@ text_sensor:
           id(wx_code) = -1;
           for (const auto &w : table)
             if (x == w.ha) { id(wx_label) = w.label; id(wx_code) = w.code; break; }
+  - platform: homeassistant
+    id: ha_tm_condition
+    entity_id: sensor.led_sign_tomorrow_condition
+    internal: true
+    on_value:
+      - lambda: |-
+          // Same mapping as today's condition above.
+          struct Wx { const char *ha, *label; int code; };
+          static const Wx table[] = {
+            {"sunny", "SUNNY", 0}, {"clear-night", "CLEAR", 0},
+            {"partlycloudy", "PARTLY", 2}, {"cloudy", "CLOUDY", 3},
+            {"fog", "FOG", 45}, {"rainy", "RAIN", 61}, {"pouring", "POURING", 65},
+            {"snowy", "SNOW", 71}, {"snowy-rainy", "SLEET", 67}, {"hail", "HAIL", 96},
+            {"lightning", "STORM", 95}, {"lightning-rainy", "STORM", 95},
+            {"windy", "WINDY", 3}, {"windy-variant", "WINDY", 3},
+            {"exceptional", "ALERT", 3},
+          };
+          id(tm_code) = -1;
+          for (const auto &w : table)
+            if (x == w.ha) { id(tm_label) = w.label; id(tm_code) = w.code; break; }
   - platform: debug
     reset_reason:
       name: "Last restart reason"
+
+binary_sensor:
+  # On from 6 PM the night before pickup until the bins are marked out
+  # (HA's "Trash night reminder" automation).
+  - platform: homeassistant
+    id: ha_trash
+    entity_id: input_boolean.trash_reminder
+    internal: true
 
 image:
   - platform: online_image
@@ -774,7 +816,7 @@ display:
       const Color sun(255, 200, 40), cloud(170, 170, 190);
       // Weather icon (sun for clear/partly, cloud otherwise, with rain/snow/bolt
       // marks) centred on cx, drawn oy rows lower than the idle screen's.
-      auto wx_icon = [&](int cx, int oy) {
+      auto wx_icon = [&](int cx, int oy, int code) {
         if (code <= 2) it.filled_circle(code == 0 ? cx : cx - 6, 10 + oy, 6, sun);
         if (code >= 1) {
           it.filled_circle(cx - 6, 12 + oy, 5, cloud);
@@ -1169,9 +1211,50 @@ display:
       }
       if (!wide) return;
 
-      // Third panel: kickoff on game day before the game, otherwise the weather.
+      // Third panel: rotating cards, 8 s each. Weather always; tomorrow's
+      // forecast after 7 PM; the Bears preview on game day before kickoff;
+      // trash the night before pickup until the bins are out.
       const int cx = 160;
-      if (gs == "pre") {
+      enum { C_WX, C_TMRW, C_BEARS, C_TRASH };
+      int cards[4], n = 0;
+      cards[n++] = C_WX;
+      if (now.hour >= 19 && id(tm_code) >= 0 && !std::isnan(id(ha_tm_hi).state)) cards[n++] = C_TMRW;
+      if (gs == "pre") cards[n++] = C_BEARS;
+      if (id(ha_trash).state) cards[n++] = C_TRASH;
+      const int card = cards[(millis() / 8000) % n];
+      const bool full = !tbar && !strip;
+
+      if (card == C_TRASH) {
+        if (full) {
+          // Trash can: lid, handle, ribbed body.
+          const Color can(60, 160, 90), rib(30, 90, 50);
+          it.filled_rectangle(cx - 3, 4, 7, 2, can);
+          it.filled_rectangle(cx - 11, 6, 23, 3, can);
+          it.filled_rectangle(cx - 9, 10, 19, 22, can);
+          for (int x = cx - 5; x <= cx + 5; x += 5) it.filled_rectangle(x, 13, 1, 16, rib);
+          txt(cx, 40, id(f8), id(c_white), TextAlign::TOP_CENTER, "TRASH");
+          txt(cx, 52, id(f8), id(c_amber), TextAlign::TOP_CENTER, "TOMORROW");
+        } else {
+          txt(cx, top + 4, id(f8), id(c_white), TextAlign::TOP_CENTER, "TRASH");
+          txt(cx, top + 16, id(f8), id(c_amber), TextAlign::TOP_CENTER, "TOMORROW");
+        }
+        return;
+      }
+      if (card == C_TMRW) {
+        char hl[16];
+        snprintf(hl, sizeof hl, "%.0f/%.0f", id(ha_tm_hi).state, id(ha_tm_lo).state);
+        txt(cx, top + 2, id(f8), id(c_dim), TextAlign::TOP_CENTER, "TOMORROW");
+        if (full) {
+          wx_icon(cx, 8, id(tm_code));
+          txt(cx, 40, id(f8), id(c_white), TextAlign::TOP_CENTER, id(tm_label));
+          txt(cx, 52, id(f8), id(c_amber), TextAlign::TOP_CENTER, hl);
+        } else {
+          txt(cx, top + 13, id(f8), id(c_white), TextAlign::TOP_CENTER, id(tm_label));
+          txt(cx, top + 24, id(f8), id(c_amber), TextAlign::TOP_CENTER, hl);
+        }
+        return;
+      }
+      if (card == C_BEARS) {
         it.filled_rectangle(129, top, W - 129, bot - top, hexc(id(g_us_c), 60));
         const int t0 = top + (tbar ? 3 : 4);
         txt(cx, t0, id(f8), hexc(id(g_us_a), 255), TextAlign::TOP_CENTER, id(g_home) ? "BEARS VS" : "BEARS AT");
@@ -1185,13 +1268,13 @@ display:
         return;
       }
       if (!tbar && !strip) {
-        wx_icon(cx, 0);
+        wx_icon(cx, 0, code);
         it.printf(cx, 38, id(f16), id(c_white), TextAlign::CENTER, "%s", temp);
         it.print(cx, 51, id(f8), id(c_white), TextAlign::CENTER, id(wx_label).c_str());
         if (!std::isnan(id(wx_hi)))
           it.printf(cx, 60, id(f8), id(c_dim), TextAlign::CENTER, "%.0f/%.0f", id(wx_hi), id(wx_lo));
       } else if (bot - top >= 48) {
-        wx_icon(cx, top);
+        wx_icon(cx, top, code);
         txt(cx, top + 22, id(f16), id(c_white), TextAlign::TOP_CENTER, temp);
         txt(cx, top + 38, id(f8), id(c_white), TextAlign::TOP_CENTER, id(wx_label));
       } else {
