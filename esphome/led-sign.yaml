@@ -273,6 +273,9 @@ globals:
   - id: wx_ts          # when the last good weather arrived (0 = never)
     type: int64_t
     initial_value: '0'
+  - id: wx_lvl         # 0 light .. 2 heavy (animation strength)
+    type: int
+    initial_value: '0'
   - id: tm_code        # tomorrow's icon code, -1 = not known yet
     type: int
     initial_value: '-1'
@@ -490,6 +493,12 @@ sensor:
     internal: true
     on_value:
       - lambda: 'if (!std::isnan(x)) id(wx_lo) = x;'
+  - platform: homeassistant
+    id: ha_wx_lvl
+    entity_id: sensor.led_sign_weather_intensity
+    internal: true
+    on_value:
+      - lambda: 'if (!std::isnan(x)) id(wx_lvl) = (int) x;'
   # Tomorrow's forecast (evening card)
   - platform: homeassistant
     id: ha_tm_hi
@@ -511,12 +520,12 @@ text_sensor:
           // numbering the icon drawing uses).
           struct Wx { const char *ha, *label; int code; };
           static const Wx table[] = {
-            {"sunny", "SUNNY", 0}, {"clear-night", "CLEAR", 0},
+            {"sunny", "SUNNY", 0}, {"clear-night", "CLEAR", 100},
             {"partlycloudy", "PARTLY", 2}, {"cloudy", "CLOUDY", 3},
-            {"fog", "FOG", 45}, {"rainy", "RAIN", 61}, {"pouring", "POURING", 65},
+            {"fog", "FOG", 45}, {"rainy", "RAIN", 61}, {"pouring", "RAIN", 65},
             {"snowy", "SNOW", 71}, {"snowy-rainy", "SLEET", 67}, {"hail", "HAIL", 96},
             {"lightning", "STORM", 95}, {"lightning-rainy", "STORM", 95},
-            {"windy", "WINDY", 3}, {"windy-variant", "WINDY", 3},
+            {"windy", "WINDY", 4}, {"windy-variant", "WINDY", 4},
             {"exceptional", "ALERT", 3},
           };
           // Unknown/unavailable: keep the last good condition.
@@ -531,12 +540,12 @@ text_sensor:
           // Same mapping as today's condition above.
           struct Wx { const char *ha, *label; int code; };
           static const Wx table[] = {
-            {"sunny", "SUNNY", 0}, {"clear-night", "CLEAR", 0},
+            {"sunny", "SUNNY", 0}, {"clear-night", "CLEAR", 100},
             {"partlycloudy", "PARTLY", 2}, {"cloudy", "CLOUDY", 3},
-            {"fog", "FOG", 45}, {"rainy", "RAIN", 61}, {"pouring", "POURING", 65},
+            {"fog", "FOG", 45}, {"rainy", "RAIN", 61}, {"pouring", "RAIN", 65},
             {"snowy", "SNOW", 71}, {"snowy-rainy", "SLEET", 67}, {"hail", "HAIL", 96},
             {"lightning", "STORM", 95}, {"lightning-rainy", "STORM", 95},
-            {"windy", "WINDY", 3}, {"windy-variant", "WINDY", 3},
+            {"windy", "WINDY", 4}, {"windy-variant", "WINDY", 4},
             {"exceptional", "ALERT", 3},
           };
           for (const auto &w : table)
@@ -819,24 +828,130 @@ display:
       char temp[8];
       snprintf(temp, sizeof temp, "%.0fF", id(wx_temp));
       const Color sun(255, 200, 40), cloud(170, 170, 190);
-      // Weather icon (sun for clear/partly, cloud otherwise, with rain/snow/bolt
-      // marks) centred on cx, drawn oy rows lower than the idle screen's.
-      auto wx_icon = [&](int cx, int oy, int code) {
-        if (code <= 2) it.filled_circle(code == 0 ? cx : cx - 6, 10 + oy, 6, sun);
-        if (code >= 1) {
-          it.filled_circle(cx - 6, 12 + oy, 5, cloud);
-          it.filled_circle(cx + 2, 9 + oy, 7, cloud);
-          it.filled_circle(cx + 9, 13 + oy, 4, cloud);
-          it.filled_rectangle(cx - 6, 13 + oy, 15, 5, cloud);
+      // Animated weather icon in the 64-px panel centred on cx, top at oy, h rows
+      // tall. code picks the scene (see the condition tables), lvl 0..2 how
+      // lively rain, snow, storms and wind are. Everything moves on millis().
+      const float tsec = millis() / 1000.0f;
+      auto frac = [](float v) { return v - floorf(v); };
+      auto cloud_at = [&](int x, int oy, Color col) {
+        it.filled_circle(x - 6, 12 + oy, 5, col);
+        it.filled_circle(x + 2, 9 + oy, 7, col);
+        it.filled_circle(x + 9, 13 + oy, 4, col);
+        it.filled_rectangle(x - 6, 13 + oy, 15, 5, col);
+      };
+      auto wx_icon = [&](int cx, int oy, int code, int lvl, int h) {
+        lvl = std::max(0, std::min(lvl, 2));
+        const int fall = std::max(2, h - 18);
+        const Color rain_c(60, 140, 255), snow_c(255, 255, 255), bolt_c(255, 240, 120);
+        const Color dark(110, 110, 130);
+        auto drops = [&](int n, float speed, int slant, int len) {
+          for (int i = 0; i < n; i++) {
+            const float ph = frac(i * 0.618f), p = frac(tsec * speed + ph);
+            const int x = cx - 11 + (i * 7) % 25 + slant, dx = (int) (-slant * p * 3);
+            const int y = oy + 18 + (int) (p * fall);
+            it.line(x + dx, y, x + dx - 1 - slant / 2, y + len, rain_c);
+          }
+        };
+        auto flakes = [&](int n, float speed, float sway, bool big) {
+          for (int i = 0; i < n; i++) {
+            const float ph = frac(i * 0.618f + 0.3f), p = frac(tsec * speed + ph);
+            const int x = cx - 12 + (i * 9) % 27 + (int) lroundf(sway * sinf(p * 4 * M_PI + ph * 6));
+            const int y = oy + 18 + (int) (p * fall);
+            it.draw_pixel_at(x, y, snow_c);
+            if (big && i % 3 == 0) it.draw_pixel_at(x + 1, y, snow_c);
+          }
+        };
+        it.start_clipping(cx - 31, oy, cx + 32, oy + h + 1);
+        if (code == 100) {                       // clear night: crescent + twinkling stars
+          it.filled_circle(cx - 2, 10 + oy, 7, Color(230, 230, 200));
+          it.filled_circle(cx + 2, 7 + oy, 6, Color(0, 0, 0));
+          static const int8_t st[6][2] = {{-20, 3}, {14, 2}, {18, 14}, {-16, 16}, {11, 22}, {-24, 10}};
+          for (int i = 0; i < 6; i++) {
+            const uint8_t b = 90 + (uint8_t) (165 * fabsf(sinf(tsec * 1.5f + i * 1.3f)));
+            it.draw_pixel_at(cx + st[i][0], oy + st[i][1], Color(b, b, b));
+          }
+        } else if (code == 0) {                  // sunny: rays breathe slowly, no spinning
+          const float b = 0.55f + 0.45f * (0.5f + 0.5f * sinf(tsec * M_PI / 2));
+          const Color ray((uint8_t) (255 * b), (uint8_t) (200 * b), (uint8_t) (40 * b));
+          it.filled_circle(cx, 10 + oy, 6, sun);
+          for (int k = 0; k < 8; k++) {
+            const float a = k * M_PI / 4;
+            for (int r = 8; r <= 10; r++)
+              it.draw_pixel_at(cx + lroundf(r * cosf(a)), 10 + oy + lroundf(r * sinf(a)), ray);
+          }
+        } else if (code == 2) {                  // partly: a cloud drifts across the sun
+          it.filled_circle(cx - 6, 10 + oy, 6, sun);
+          cloud_at(cx + lroundf(3 * sinf(tsec * M_PI / 2)), oy, cloud);
+        } else if (code == 4) {                  // windy: gust streaks, more and faster when gusty
+          const int n = lvl == 0 ? 2 : (lvl == 1 ? 3 : 5);
+          const float sp = lvl == 0 ? 0.25f : (lvl == 1 ? 0.5f : 1.0f);
+          for (int i = 0; i < n; i++) {
+            const int y = oy + 4 + i * (std::max(h - 8, 8) / n), L = 12 + (i * 7) % 10;
+            const int x0 = cx - 51 + (int) (frac(tsec * sp + i * 0.37f) * 70);
+            const Color col = i % 2 ? Color(130, 130, 145) : cloud;
+            it.horizontal_line(x0, y, L, col);
+            it.draw_pixel_at(x0 + L + 1, y - 1, col);
+            if (lvl == 2 && i % 2) {
+              it.draw_pixel_at(x0 + L + 2, y - 2, col);
+              it.draw_pixel_at(x0 + L + 1, y - 3, col);
+            }
+          }
+        } else if (code == 45) {                 // fog: bands slide back and forth
+          for (int i = 0; i < 4; i++) {
+            const int off = lroundf(4 * sinf(tsec * 1.2f + i));
+            it.horizontal_line(cx - 14 + off, oy + 4 + i * std::max(3, (h - 8) / 4), 28,
+                               i % 2 ? Color(130, 130, 140) : Color(100, 100, 110));
+          }
+        } else if (code >= 95) {                 // storm: flashes and bolts, more when severe
+          static const int fl0[] = {0}, fl1[] = {0, 2, 30}, fl2[] = {0, 2, 14, 30, 32, 40};
+          const int *fl = lvl == 0 ? fl0 : (lvl == 1 ? fl1 : fl2);
+          const int nfl = lvl == 0 ? 1 : (lvl == 1 ? 3 : 6), fr = (millis() % 4000) / 80;
+          bool flash = false, bolt = false;
+          for (int i = 0; i < nfl; i++) {
+            if (fr == fl[i]) flash = true;
+            if (fr == fl[i] || fr == fl[i] + 1) bolt = true;
+          }
+          cloud_at(cx, oy, flash ? Color(220, 220, 235) : dark);
+          drops(lvl == 0 ? 4 : (lvl == 1 ? 9 : 16), (2 + lvl) / 4.0f, lvl, 2 + lvl);
+          if (bolt) {
+            it.line(cx + 2, oy + 18, cx - 1, oy + 24, bolt_c);
+            it.line(cx - 1, oy + 24, cx + 3, oy + 24, bolt_c);
+            it.line(cx + 3, oy + 24, cx, oy + 29, bolt_c);
+            if (lvl == 2) {
+              it.line(cx - 8, oy + 17, cx - 10, oy + 22, bolt_c);
+              it.line(cx - 10, oy + 22, cx - 7, oy + 22, bolt_c);
+              it.line(cx - 7, oy + 22, cx - 9, oy + 27, bolt_c);
+            }
+          }
+        } else if (code >= 71 && code <= 86) {   // snow: more flakes, more sway when heavy
+          cloud_at(cx, oy, cloud);
+          flakes(lvl == 0 ? 5 : (lvl == 1 ? 10 : 18), lvl == 2 ? 0.5f : 0.25f,
+                 lvl == 0 ? 1.0f : (lvl == 1 ? 1.5f : 2.5f), lvl == 2);
+        } else if (code == 67) {                 // sleet: rain and snow together
+          cloud_at(cx, oy, cloud);
+          drops(5, 0.5f, 0, 2);
+          flakes(5, 0.25f, 1.0f, false);
+        } else if (code >= 51) {                 // rain: denser, faster, slanted when heavy
+          cloud_at(cx, oy, lvl == 2 ? dark : cloud);
+          drops(lvl == 0 ? 5 : (lvl == 1 ? 10 : 18), lvl == 0 ? 0.25f : (lvl == 1 ? 0.5f : 0.75f), lvl, 2 + lvl);
+        } else {                                 // cloudy: two clouds drift past each other
+          cloud_at(cx - 8 + lroundf(2 * sinf(tsec * 1.6f)), oy - 4, dark);
+          cloud_at(cx + 2 + lroundf(3 * sinf(tsec * 1.6f + 2)), oy, cloud);
         }
-        if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82))
-          for (int i = -6; i <= 6; i += 4) it.line(cx + i, 20 + oy, cx + i - 2, 24 + oy, Color(60, 140, 255));
-        if ((code >= 71 && code <= 77) || code == 85 || code == 86)
-          for (int i = -6; i <= 6; i += 4) it.draw_pixel_at(cx + i, 22 + oy, Color(255, 255, 255));
-        if (code >= 95) it.line(cx + 1, 19 + oy, cx - 2, 25 + oy, sun);
+        it.end_clipping();
       };
       // Small version for the music screen's time line.
       auto wx_small = [&](int cx, int cy) {
+        if (code == 100) {
+          it.filled_circle(cx, cy, 4, Color(230, 230, 200));
+          it.filled_circle(cx + 2, cy - 2, 3, Color(0, 0, 0));
+          return;
+        }
+        if (code == 4) {
+          it.horizontal_line(cx - 6, cy - 2, 10, cloud);
+          it.horizontal_line(cx - 3, cy + 2, 10, cloud);
+          return;
+        }
         if (code <= 2) it.filled_circle(code == 0 ? cx : cx - 3, code == 0 ? cy : cy - 2, code == 0 ? 4 : 3, sun);
         if (code >= 1) {
           it.filled_circle(cx - 3, cy + 1, 3, cloud);
@@ -1251,7 +1366,7 @@ display:
         snprintf(hl, sizeof hl, "%.0f/%.0f", id(ha_tm_hi).state, id(ha_tm_lo).state);
         txt(cx, top + 2, id(f8), id(c_dim), TextAlign::TOP_CENTER, "TOMORROW");
         if (full) {
-          wx_icon(cx, 8, id(tm_code));
+          wx_icon(cx, 8, id(tm_code), 1, 26);
           txt(cx, 40, id(f8), id(c_white), TextAlign::TOP_CENTER, id(tm_label));
           txt(cx, 52, id(f8), id(c_amber), TextAlign::TOP_CENTER, hl);
         } else {
@@ -1276,13 +1391,13 @@ display:
       // Small dim dot in the corner when the weather is more than 3 hours old.
       if (id(wx_ts) > 0 && ts - id(wx_ts) > 3 * 3600) it.filled_rectangle(W - 3, top + 1, 2, 2, id(c_gray));
       if (!tbar && !strip) {
-        wx_icon(cx, 0, code);
+        wx_icon(cx, 0, code, id(wx_lvl), 28);
         it.printf(cx, 38, id(f16), id(c_white), TextAlign::CENTER, "%s", temp);
         it.print(cx, 51, id(f8), id(c_white), TextAlign::CENTER, id(wx_label).c_str());
         if (!std::isnan(id(wx_hi)))
           it.printf(cx, 60, id(f8), id(c_dim), TextAlign::CENTER, "%.0f/%.0f", id(wx_hi), id(wx_lo));
       } else if (bot - top >= 48) {
-        wx_icon(cx, top, code);
+        wx_icon(cx, top, code, id(wx_lvl), 20);
         txt(cx, top + 22, id(f16), id(c_white), TextAlign::TOP_CENTER, temp);
         txt(cx, top + 38, id(f8), id(c_white), TextAlign::TOP_CENTER, id(wx_label));
       } else {
