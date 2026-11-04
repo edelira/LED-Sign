@@ -935,8 +935,8 @@ display:
           cloud_at(cx, oy, lvl == 2 ? dark : cloud);
           drops(lvl == 0 ? 5 : (lvl == 1 ? 10 : 18), lvl == 0 ? 0.25f : (lvl == 1 ? 0.5f : 0.75f), lvl, 2 + lvl);
         } else {                                 // cloudy: two clouds drift past each other
-          cloud_at(cx - 8 + lroundf(2 * sinf(tsec * 1.6f)), oy - 4, dark);
-          cloud_at(cx + 2 + lroundf(3 * sinf(tsec * 1.6f + 2)), oy, cloud);
+          cloud_at(cx - 8 + lroundf(2 * sinf(tsec * 1.6f)), oy - 1, dark);
+          cloud_at(cx + 2 + lroundf(3 * sinf(tsec * 1.6f + 2)), oy + 3, cloud);
         }
         it.end_clipping();
       };
