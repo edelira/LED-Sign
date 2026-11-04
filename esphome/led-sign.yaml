@@ -270,6 +270,9 @@ globals:
     initial_value: '-1'
   - id: wx_label
     type: std::string
+  - id: wx_ts          # when the last good weather arrived (0 = never)
+    type: int64_t
+    initial_value: '0'
   - id: tm_code        # tomorrow's icon code, -1 = not known yet
     type: int
     initial_value: '-1'
@@ -464,26 +467,29 @@ sensor:
   - platform: debug
     free:
       name: "Free memory"
-  # Weather from Home Assistant
+  # Weather from Home Assistant (Met.no, falling back to Open-Meteo). Gaps
+  # (unavailable / NaN) are ignored so the last good reading stays up.
   - platform: homeassistant
     id: ha_wx_temp
-    entity_id: weather.forecast_home
-    attribute: temperature
+    entity_id: sensor.led_sign_temperature
     internal: true
     on_value:
-      - lambda: 'id(wx_temp) = x;'
+      - lambda: |-
+          if (std::isnan(x)) return;
+          id(wx_temp) = x;
+          id(wx_ts) = id(sntp_time).now().timestamp;
   - platform: homeassistant
     id: ha_wx_hi
     entity_id: sensor.led_sign_today_high
     internal: true
     on_value:
-      - lambda: 'id(wx_hi) = x;'
+      - lambda: 'if (!std::isnan(x)) id(wx_hi) = x;'
   - platform: homeassistant
     id: ha_wx_lo
     entity_id: sensor.led_sign_today_low
     internal: true
     on_value:
-      - lambda: 'id(wx_lo) = x;'
+      - lambda: 'if (!std::isnan(x)) id(wx_lo) = x;'
   # Tomorrow's forecast (evening card)
   - platform: homeassistant
     id: ha_tm_hi
@@ -497,7 +503,7 @@ sensor:
 text_sensor:
   - platform: homeassistant
     id: ha_wx_condition
-    entity_id: weather.forecast_home
+    entity_id: sensor.led_sign_weather_condition
     internal: true
     on_value:
       - lambda: |-
@@ -513,7 +519,7 @@ text_sensor:
             {"windy", "WINDY", 3}, {"windy-variant", "WINDY", 3},
             {"exceptional", "ALERT", 3},
           };
-          id(wx_code) = -1;
+          // Unknown/unavailable: keep the last good condition.
           for (const auto &w : table)
             if (x == w.ha) { id(wx_label) = w.label; id(wx_code) = w.code; break; }
   - platform: homeassistant
@@ -533,7 +539,6 @@ text_sensor:
             {"windy", "WINDY", 3}, {"windy-variant", "WINDY", 3},
             {"exceptional", "ALERT", 3},
           };
-          id(tm_code) = -1;
           for (const auto &w : table)
             if (x == w.ha) { id(tm_label) = w.label; id(tm_code) = w.code; break; }
   - platform: debug
@@ -1268,6 +1273,8 @@ display:
         it.print(cx, (top + bot) / 2, id(f8), id(c_dim), TextAlign::CENTER, "NO WX");
         return;
       }
+      // Small dim dot in the corner when the weather is more than 3 hours old.
+      if (id(wx_ts) > 0 && ts - id(wx_ts) > 3 * 3600) it.filled_rectangle(W - 3, top + 1, 2, 2, id(c_gray));
       if (!tbar && !strip) {
         wx_icon(cx, 0, code);
         it.printf(cx, 38, id(f16), id(c_white), TextAlign::CENTER, "%s", temp);
