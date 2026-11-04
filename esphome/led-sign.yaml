@@ -521,7 +521,7 @@ text_sensor:
           struct Wx { const char *ha, *label; int code; };
           static const Wx table[] = {
             {"sunny", "SUNNY", 0}, {"clear-night", "CLEAR", 100},
-            {"partlycloudy", "PARTLY", 2}, {"cloudy", "CLOUDY", 3},
+            {"partlycloudy", "PT CLOUDY", 2}, {"cloudy", "CLOUDY", 3},
             {"fog", "FOG", 45}, {"rainy", "RAIN", 61}, {"pouring", "RAIN", 65},
             {"snowy", "SNOW", 71}, {"snowy-rainy", "SLEET", 67}, {"hail", "HAIL", 96},
             {"lightning", "STORM", 95}, {"lightning-rainy", "STORM", 95},
@@ -541,7 +541,7 @@ text_sensor:
           struct Wx { const char *ha, *label; int code; };
           static const Wx table[] = {
             {"sunny", "SUNNY", 0}, {"clear-night", "CLEAR", 100},
-            {"partlycloudy", "PARTLY", 2}, {"cloudy", "CLOUDY", 3},
+            {"partlycloudy", "PT CLOUDY", 2}, {"cloudy", "CLOUDY", 3},
             {"fog", "FOG", 45}, {"rainy", "RAIN", 61}, {"pouring", "RAIN", 65},
             {"snowy", "SNOW", 71}, {"snowy-rainy", "SLEET", 67}, {"hail", "HAIL", 96},
             {"lightning", "STORM", 95}, {"lightning-rainy", "STORM", 95},
