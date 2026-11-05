@@ -332,7 +332,7 @@ def idea_tiles():
 def idea_strip():
     """2. Big clock and weather on top, a segmented status strip below."""
     it = Sign()
-    it.txt(64, 10, 32, AMBER, "TOP_CENTER", "8:15")
+    it.txt(58, 10, 32, AMBER, "TOP_CENTER", "8:15")
     it.txt(122, 10, 8, DIM, "TOP_RIGHT", "PM")
     wx_icon(it, 162, 0, 3, 0, 22)
     it.txt(162, 28, 16, WHITE, "TOP_CENTER", "47F")
@@ -498,6 +498,194 @@ SCREENS = [
 
 
 # ---------------------------------------------------------------------------
+# Idea 2 variations: big clock on top, status strip.
+
+TRASH_FG, TRASH_BG = (60, 200, 100), (15, 60, 30)
+TMRW_FG, TMRW_BG = (140, 190, 255), (10, 25, 60)
+DATE_BG = (28, 24, 20)
+
+
+class Seg:
+    """One strip segment: optional icon (width, draw(it, x, y)) then text."""
+
+    def __init__(self, text, fg, bg, icon=None, grow=1.0):
+        self.text, self.fg, self.bg, self.icon, self.grow = text, fg, bg, icon, grow
+
+
+def ico_rain(it, x, y):
+    wx_small(it, x + 6, y + 4, 61)
+
+
+def ico_cloud(it, x, y):
+    wx_small(it, x + 6, y + 4, 3)
+
+
+def ico_sun(it, x, y):
+    wx_small(it, x + 6, y + 4, 2)
+
+
+def ico_can(bg):
+    return lambda it, x, y: can_icon(it, x, y - 1, TRASH_FG, bg)
+
+
+ICON_W = {ico_rain: 13, ico_cloud: 13, ico_sun: 13}
+
+
+def icon_w(icon):
+    return ICON_W.get(icon, 8) if icon else 0
+
+
+def strip(it, segs, y, h=14, style="fill", x0=0, x1=W):
+    """Lay segments out across x0..x1: natural widths, spare room shared out."""
+    nat = [icon_w(s.icon) + (3 if s.icon else 0) + it.text_w(8, s.text) + 6 for s in segs]
+    spare = (x1 - x0) - sum(nat)
+    tot = sum(s.grow for s in segs)
+    x = x0
+    for k, (s, n) in enumerate(zip(segs, nat)):
+        w = n + int(spare * s.grow / tot) if k < len(segs) - 1 else x1 - x
+        if style == "fill":
+            it.rect(x, y, w, h, s.bg)
+        elif style == "outline":
+            c = scale(s.fg, 0.6)
+            it.hline(x + 2, y, w - 4, c)
+            it.hline(x + 2, y + h - 1, w - 4, c)
+            it.vline(x + 1, y + 1, h - 2, c)
+            it.vline(x + w - 2, y + 1, h - 2, c)
+        elif style == "underline":
+            it.rect(x + 2, y + h - 2, w - 4, 2, s.fg)
+        cw = n - 6
+        cx = x + (w - cw) // 2
+        ty = y + (h - 5) // 2 - (1 if style == "underline" else 0)
+        if s.icon:
+            s.icon(it, cx, ty - 2)
+            cx += icon_w(s.icon) + 3
+        it.txt(cx, ty, 8, s.fg, "TOP_LEFT", s.text)
+        x += w
+
+
+def top_clock(it, hm, ampm, temp, code, y=0, h=50, wx=True):
+    """Big clock on the left 128 px and the weather block on the right panel."""
+    cy = y + (h - 20) // 2
+    if wx:
+        it.txt(58, cy, 32, AMBER, "TOP_CENTER", hm)
+        it.txt(124, cy, 8, DIM, "TOP_RIGHT", ampm)
+        wx_icon(it, 162, y, code, 0, 22)
+        it.txt(162, y + 28, 16, WHITE, "TOP_CENTER", temp)
+    else:
+        it.txt(92, cy, 32, AMBER, "TOP_CENTER", hm)
+        it.txt(92 + it.text_w(32, hm) // 2 + 4, cy, 8, DIM, "TOP_LEFT", ampm)
+
+
+def trash_night_segs(style_bg=True):
+    bg = lambda c: c if style_bg else BLACK
+    return [
+        Seg("WED 4", WHITE, bg(DATE_BG)),
+        Seg("52/38", TMRW_FG, bg(TMRW_BG), ico_rain),
+        Seg("TRASH AM", TRASH_FG, bg(TRASH_BG), ico_can(bg(TRASH_BG))),
+    ]
+
+
+def v_a():
+    it = Sign()
+    top_clock(it, "8:15", "PM", "47F", 3)
+    strip(it, trash_night_segs(), 50)
+    return it
+
+
+def v_b():
+    it = Sign()
+    top_clock(it, "2:47", "PM", "58F", 2)
+    strip(it, [Seg("THU NOV 5", WHITE, DATE_BG),
+               Seg("H64 L41", AMBER, (50, 32, 8)),
+               Seg("TMRW 52", TMRW_FG, TMRW_BG, ico_rain)], 50)
+    return it
+
+
+def v_c():
+    it = Sign()
+    top_clock(it, "8:15", "PM", "47F", 3)
+    strip(it, trash_night_segs(False), 50, style="outline")
+    return it
+
+
+def v_d():
+    it = Sign()
+    top_clock(it, "8:15", "PM", "47F", 3)
+    strip(it, trash_night_segs(False), 50, style="underline")
+    return it
+
+
+def v_e():
+    it = Sign()
+    strip(it, trash_night_segs(), 0)
+    top_clock(it, "8:15", "PM", "47F", 3, y=14, h=50)
+    return it
+
+
+def v_f():
+    it = Sign()
+    top_clock(it, "8:15", "PM", "", 3, wx=False)
+    it.txt(92, 40, 8, DIM, "TOP_CENTER", "WED NOV 4")
+    strip(it, [Seg("NOW 47", WHITE, DATE_BG, ico_cloud),
+               Seg("TMRW 52/38", TMRW_FG, TMRW_BG, ico_rain),
+               Seg("TRASH AM", TRASH_FG, TRASH_BG, ico_can(TRASH_BG))], 50)
+    return it
+
+
+def v_g():
+    it = Sign()
+    top_clock(it, "9:30", "PM", "45F", 3)
+    it.rect(0, 50, W, 14, (25, 110, 50))
+    for x in (4, 180):
+        can_icon(it, x, 51, (200, 255, 210), (25, 110, 50), lid_open=True)
+    it.txt(96, 54, 8, (220, 255, 225), "TOP_CENTER", "PUT THE TRASH OUT")
+    return it
+
+
+def v_h():
+    it = Sign()
+    top_clock(it, "8:15", "PM", "47F", 3, h=46)
+    # Tomorrow's temperatures, 6 AM .. 10 PM, as a line in the left of the strip.
+    temps = [38, 39, 41, 44, 47, 49, 51, 52, 52, 51, 49, 47, 45, 44, 43, 42, 41]
+    rain = set(range(3, 8))
+    x0, x1, y0, y1 = 32, 124, 62, 50
+    it.txt(2, 54, 8, DIM, "TOP_LEFT", "TMRW")
+    for x in range(x0, x1):
+        h = (x - x0) / (x1 - x0) * (len(temps) - 1)
+        i = min(int(h), len(temps) - 2)
+        tf = temps[i] + (temps[i + 1] - temps[i]) * (h - i)
+        y = round(y0 - (tf - 36) / (54 - 36) * (y0 - y1))
+        c = temp_color(tf)
+        it.vline(x, y + 1, 64 - y - 1, scale(c, 0.12))
+        it.px(x, y, c)
+        if i in rain and x % 2 == 0:
+            it.px(x, 63, RAIN_C)
+    strip(it, [Seg("TRASH AM", TRASH_FG, TRASH_BG, ico_can(TRASH_BG))], 50, x0=128)
+    return it
+
+
+def v_i():
+    it = Sign()
+    top_clock(it, "11:40", "PM", "44F", 3)
+    strip(it, trash_night_segs(), 50)
+    it.buf = (it.buf.astype(np.float32) * 0.3).astype(np.uint8)
+    return it
+
+
+STRIP_SCREENS = [
+    ("strip_a_fill", "A: filled segments (idea 2 as drawn)", v_a),
+    ("strip_b_day", "B: normal afternoon, no trash: date | today | tomorrow", v_b),
+    ("strip_c_outline", "C: outlined chips", v_c),
+    ("strip_d_underline", "D: coloured underlines only", v_d),
+    ("strip_e_top", "E: strip on top, like a phone status bar", v_e),
+    ("strip_f_wide_clock", "F: clock spans the sign, NOW moves into the strip", v_f),
+    ("strip_g_takeover", "G: trash takeover, whole strip after 9 PM", v_g),
+    ("strip_h_graph", "H: tomorrow's temperature line in the strip", v_h),
+    ("strip_i_night", "I: same as A, dimmed for late evening", v_i),
+]
+
+
+# ---------------------------------------------------------------------------
 # LED look: every pixel becomes a soft round dot; unlit LEDs stay faintly visible.
 
 def led(img, s=6, bg=(10, 10, 11), off=(26, 26, 28)):
@@ -513,26 +701,28 @@ def led(img, s=6, bg=(10, 10, 11), off=(26, 26, 28)):
     return Image.fromarray((np.clip(out, 0, 1) * 255).astype(np.uint8), "RGB")
 
 
-def main():
-    os.makedirs(OUT, exist_ok=True)
-    label_f = ImageFont.truetype("DejaVuSans.ttf", 22)
-    tiles = []
-    for name, title, fn in SCREENS:
-        im = led(fn().image())
+def sheet(items, path, label_f):
+    tiles = [(title, led(fn().image())) for _, title, fn in items]
+    for (name, _, _), (_, im) in zip(items, tiles):
         im.save(os.path.join(OUT, name + ".png"))
-        tiles.append((title, im))
-    # Contact sheet, one screen per row.
     tw, th = tiles[0][1].size
     pad, lab = 24, 34
-    sheet = Image.new("RGB", (tw + 2 * pad, len(tiles) * (th + lab + pad) + pad), (32, 32, 34))
-    d = ImageDraw.Draw(sheet)
+    out = Image.new("RGB", (tw + 2 * pad, len(tiles) * (th + lab + pad) + pad), (32, 32, 34))
+    d = ImageDraw.Draw(out)
     y = pad
     for title, im in tiles:
         d.text((pad, y), title, font=label_f, fill=(220, 220, 220))
-        sheet.paste(im, (pad, y + lab))
+        out.paste(im, (pad, y + lab))
         y += th + lab + pad
-    sheet.save(os.path.join(OUT, "sheet.png"))
-    print("wrote", len(tiles), "screens to", OUT)
+    out.save(os.path.join(OUT, path))
+
+
+def main():
+    os.makedirs(OUT, exist_ok=True)
+    label_f = ImageFont.truetype("DejaVuSans.ttf", 22)
+    sheet(SCREENS, "sheet.png", label_f)
+    sheet(STRIP_SCREENS, "sheet_strip.png", label_f)
+    print("wrote", len(SCREENS) + len(STRIP_SCREENS), "screens to", OUT)
 
 
 if __name__ == "__main__":
