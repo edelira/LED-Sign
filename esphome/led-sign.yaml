@@ -255,15 +255,6 @@ http_request:
 debug:
   update_interval: 60s
 
-# On-board LIS3DH accelerometer (address 0x19), used to feel the wall shake
-# when a freight train passes.
-i2c:
-  id: i2c_bus
-  sda: GPIO16
-  scl: GPIO17
-  frequency: 400kHz
-  scan: false
-
 globals:
   - id: wx_temp
     type: float
@@ -422,14 +413,6 @@ globals:
   - id: g_b6_until
     type: int64_t
     initial_value: '0'
-  # Wall vibration (LIS3DH): RMS over the last second, and the highest of
-  # those since the Vibration sensor last reported, in mg.
-  - id: vib_now
-    type: float
-    initial_value: '0'
-  - id: vib_peak
-    type: float
-    initial_value: '0'
 
 switch:
   - platform: template
@@ -479,18 +462,6 @@ number:
             - hub75.set_brightness:
                 id: sign
                 brightness: !lambda 'return (int) (x * 255 / 100);'
-  - platform: template
-    name: "Vibration threshold"
-    id: vib_threshold
-    icon: mdi:vibrate
-    entity_category: config
-    unit_of_measurement: mg
-    min_value: 1
-    max_value: 100
-    step: 0.5
-    optimistic: true
-    restore_value: true
-    initial_value: 6
 
 sensor:
   - platform: uptime
@@ -499,20 +470,6 @@ sensor:
   - platform: debug
     free:
       name: "Free memory"
-  # Strongest 1-second wall vibration in the last 5 s. Quiet is a steady
-  # few mg (sensor noise); a passing train should show as minutes of higher
-  # readings.
-  - platform: template
-    name: "Vibration"
-    icon: mdi:vibrate
-    unit_of_measurement: mg
-    state_class: measurement
-    accuracy_decimals: 1
-    update_interval: 5s
-    lambda: |-
-      const float v = id(vib_peak);
-      id(vib_peak) = 0;
-      return v;
   # Weather from Home Assistant (Met.no, falling back to Open-Meteo). Gaps
   # (unavailable / NaN) are ignored so the last good reading stays up.
   - platform: homeassistant
@@ -598,15 +555,6 @@ text_sensor:
       name: "Last restart reason"
 
 binary_sensor:
-  # On while the wall keeps shaking above the threshold (a door slam or
-  # footsteps are too short to count).
-  - platform: template
-    name: "Wall rumble"
-    icon: mdi:train-car-container
-    lambda: 'return id(vib_now) > id(vib_threshold).state;'
-    filters:
-      - delayed_on: 15s
-      - delayed_off: 10s
   # On from 6 PM the night before pickup until the bins are marked out
   # (HA's "Trash night reminder" automation).
   - platform: homeassistant
@@ -758,62 +706,6 @@ interval:
           static uint8_t tick = 0;
           bool animating = id(show_trains).state && id(tr_until) > id(sntp_time).now().timestamp;
           if (animating || ++tick % 2 == 0) id(sign).update();
-  # Read the accelerometer's FIFO (100 samples/s, holds 32) and work out how
-  # hard the wall is shaking: RMS of the movement after taking out gravity
-  # and the sign's tilt (a slow running average per axis).
-  - interval: 150ms
-    then:
-      - lambda: |-
-          static bool ready = false, warned = false, primed = false;
-          static float mx = 0, my = 0, mz = 0;
-          static float sumsq = 0;
-          static int cnt = 0;
-          static uint32_t win = 0;
-          auto *bus = id(i2c_bus);
-          const uint8_t A = 0x19;
-          auto rd = [&](uint8_t reg, uint8_t *d, size_t n) {
-            return bus->write_readv(A, &reg, 1, d, n) == i2c::ERROR_OK;
-          };
-          auto wr = [&](uint8_t reg, uint8_t v) {
-            const uint8_t b[2] = {reg, v};
-            return bus->write(A, b, 2) == i2c::ERROR_OK;
-          };
-          if (!ready) {
-            uint8_t who = 0;
-            if (!rd(0x0F, &who, 1) || who != 0x33) {
-              if (!warned) ESP_LOGW("vib", "LIS3DH not found (WHO_AM_I 0x%02X)", who);
-              warned = true;
-              return;
-            }
-            // 100 Hz, XYZ on; +-2 g high resolution (1 mg per step); FIFO in stream mode.
-            ready = wr(0x20, 0x57) && wr(0x21, 0x00) && wr(0x23, 0x08) && wr(0x24, 0x40) && wr(0x2E, 0x80);
-            ESP_LOGI("vib", "LIS3DH %s", ready ? "ready" : "setup failed");
-            win = millis();
-            return;
-          }
-          uint8_t src = 0;
-          if (!rd(0x2F, &src, 1)) return;
-          int n = (src & 0x40) ? 32 : (src & 0x1F);
-          for (int i = 0; i < n; i++) {
-            uint8_t d[6];
-            if (!rd(0x28 | 0x80, d, 6)) break;
-            const float x = (int16_t) (d[0] | d[1] << 8) >> 4;
-            const float y = (int16_t) (d[2] | d[3] << 8) >> 4;
-            const float z = (int16_t) (d[4] | d[5] << 8) >> 4;
-            if (!primed) { mx = x; my = y; mz = z; primed = true; }
-            mx += 0.02f * (x - mx);
-            my += 0.02f * (y - my);
-            mz += 0.02f * (z - mz);
-            sumsq += (x - mx) * (x - mx) + (y - my) * (y - my) + (z - mz) * (z - mz);
-            cnt++;
-          }
-          if (millis() - win >= 1000 && cnt > 0) {
-            id(vib_now) = sqrtf(sumsq / cnt);
-            if (id(vib_now) > id(vib_peak)) id(vib_peak) = id(vib_now);
-            sumsq = 0;
-            cnt = 0;
-            win = millis();
-          }
 
 display:
   - platform: hub75
