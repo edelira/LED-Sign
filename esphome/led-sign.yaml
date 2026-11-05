@@ -764,11 +764,17 @@ interval:
   - interval: 150ms
     then:
       - lambda: |-
-          static bool ready = false, warned = false, primed = false;
+          // A failed I2C transfer can block for up to 100 ms, so back off
+          // 30 s after any failure and give up for good after 5, rather than
+          // stalling the display and Wi-Fi.
+          static bool ready = false, primed = false;
+          static uint8_t fails = 0;
+          static uint32_t retry_at = 0;
           static float mx = 0, my = 0, mz = 0;
           static float sumsq = 0;
           static int cnt = 0;
           static uint32_t win = 0;
+          if (fails >= 5 || (int32_t) (millis() - retry_at) < 0) return;
           auto *bus = id(i2c_bus);
           const uint8_t A = 0x19;
           auto rd = [&](uint8_t reg, uint8_t *d, size_t n) {
@@ -778,25 +784,35 @@ interval:
             const uint8_t b[2] = {reg, v};
             return bus->write(A, b, 2) == i2c::ERROR_OK;
           };
+          auto fail = [&](const char *what) {
+            ready = false;
+            fails++;
+            retry_at = millis() + 30000;
+            if (fails >= 5) ESP_LOGE("vib", "LIS3DH %s; giving up until restart", what);
+            else ESP_LOGW("vib", "LIS3DH %s (try %u of 5)", what, fails);
+          };
           if (!ready) {
             uint8_t who = 0;
             if (!rd(0x0F, &who, 1) || who != 0x33) {
-              if (!warned) ESP_LOGW("vib", "LIS3DH not found (WHO_AM_I 0x%02X)", who);
-              warned = true;
+              fail(who ? "wrong WHO_AM_I" : "not answering");
               return;
             }
             // 100 Hz, XYZ on; +-2 g high resolution (1 mg per step); FIFO in stream mode.
-            ready = wr(0x20, 0x57) && wr(0x21, 0x00) && wr(0x23, 0x08) && wr(0x24, 0x40) && wr(0x2E, 0x80);
-            ESP_LOGI("vib", "LIS3DH %s", ready ? "ready" : "setup failed");
+            if (!(wr(0x20, 0x57) && wr(0x21, 0x00) && wr(0x23, 0x08) && wr(0x24, 0x40) && wr(0x2E, 0x80))) {
+              fail("setup failed");
+              return;
+            }
+            ready = true;
+            ESP_LOGI("vib", "LIS3DH ready");
             win = millis();
             return;
           }
           uint8_t src = 0;
-          if (!rd(0x2F, &src, 1)) return;
+          if (!rd(0x2F, &src, 1)) { fail("read failed"); return; }
           int n = (src & 0x40) ? 32 : (src & 0x1F);
           for (int i = 0; i < n; i++) {
             uint8_t d[6];
-            if (!rd(0x28 | 0x80, d, 6)) break;
+            if (!rd(0x28 | 0x80, d, 6)) { fail("read failed"); return; }
             const float x = (int16_t) (d[0] | d[1] << 8) >> 4;
             const float y = (int16_t) (d[2] | d[3] << 8) >> 4;
             const float z = (int16_t) (d[4] | d[5] << 8) >> 4;
