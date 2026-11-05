@@ -1299,7 +1299,18 @@ display:
           it.horizontal_line(x0 - 4, 40, xr - x0 + 6, line_c);
           txt(x0, 47, id(f16), id(c_amber), TextAlign::TOP_LEFT, hm);
           txt(x0 + text_w(id(f16), hm) + 5, 47, id(f8), id(c_dim), TextAlign::TOP_LEFT, ampm);
-          if (have_wx) {
+          // The night before pickup, a green TRASH / TMRW tag takes the
+          // weather's spot every other 8 s (or for good if there's no weather).
+          if (id(ha_trash).state && (!have_wx || (millis() / 8000) % 2)) {
+            const Color tag_bg(15, 60, 30), tag_fg(60, 200, 100);
+            it.filled_rectangle(xr - 44, 45, 46, 15, tag_bg);     // clears "12:59 PM"
+            it.filled_rectangle(xr - 41, 47, 7, 2, tag_fg);       // lid
+            it.filled_rectangle(xr - 40, 49, 5, 9, tag_fg);       // can
+            it.horizontal_line(xr - 39, 51, 3, tag_bg);           // ribs
+            it.horizontal_line(xr - 39, 54, 3, tag_bg);
+            txt(xr - 31, 46, id(f8), tag_fg, TextAlign::TOP_LEFT, "TRASH");
+            txt(xr - 31, 53, id(f8), tag_fg, TextAlign::TOP_LEFT, "TMRW");
+          } else if (have_wx) {
             txt(xr, 47, id(f16), id(c_white), TextAlign::TOP_RIGHT, temp);
             wx_small(xr - text_w(id(f16), temp) - 10, 52);
           }
