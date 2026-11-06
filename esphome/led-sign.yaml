@@ -1008,10 +1008,15 @@ display:
         const bool left = id(tr_west);           // westbound runs right to left
         const float phase = el * 0.0225f;        // wheel spin
 
-        // Colours by operator: Amtrak silver/blue/red, freight orange.
+        // Colours by operator: Amtrak silver/blue/red, freight orange, Metra
+        // blue locomotive with silver bi-level (gallery) cars.
+        const bool metra = id(tr_operator) == "METRA";
         Color body(170, 175, 185), st1(30, 80, 200), st2(220, 30, 40);
         if (id(tr_operator) == "FREIGHT") { body = Color(230, 100, 20); st1 = Color(20, 20, 20); st2 = Color(255, 200, 40); }
-        const Color glass(110, 160, 230), dark(25, 30, 45), wheel(60, 60, 60);
+        Color glass(110, 160, 230), locoBody = body, locoSt1 = st1;
+        if (metra) { body = Color(165, 170, 180); st1 = Color(20, 70, 200); glass = Color(40, 55, 80);
+                     locoBody = Color(20, 70, 200); locoSt1 = Color(165, 170, 180); }
+        const Color dark(25, 30, 45), wheel(60, 60, 60);
         const Color rail(90, 90, 90), tie(60, 40, 25), lamp(255, 220, 60);
 
         // Drawing helpers, clipped by hand to [clip0, clip1).
@@ -1034,24 +1039,38 @@ display:
         auto car = [&](int x, int top, int L, int h) {
           box(x + 1, top, L - 2, 1, body);
           box(x, top + 1, L, h - 1, body);
+          if (metra) {
+            // Gallery car: upper and lower window rows, thin blue/red belt.
+            int ww = std::max(2, h / 6);
+            for (int wx = x + 3; wx < x + L - 3; wx += ww + 2) {
+              box(wx, top + h / 5, ww, ww, glass);
+              box(wx, top + h / 2, ww, ww, glass);
+            }
+            box(x, top + h / 2 + ww + 1, L, 1, st1);
+            box(x, top + h / 2 + ww + 2, L, 1, st2);
+            wheels(x, top, L, h);
+            return;
+          }
           int wy = top + std::max(2, h / 5), wh = std::max(2, h / 4), s = std::max(1, h / 8);
           for (int wx = x + 3; wx < x + L - 4; wx += std::max(4, h / 3)) box(wx, wy, std::max(2, h / 5), wh, glass);
           box(x, wy + wh + 1, L, s, st1);
           box(x, wy + wh + 1 + s, L, 1, st2);
           wheels(x, top, L, h);
         };
-        auto loco = [&](int x, int top, int L, int h) {
-          int nose = h / 2, s = std::max(1, h / 8);
+        // faceLeft: which end the nose is on (a Metra loco pushing an
+        // inbound train faces west, away from the direction of travel).
+        auto loco = [&](int x, int top, int L, int h, bool faceLeft) {
+          int nose = metra ? h / 3 : h / 2, s = std::max(1, h / 8);
           for (int i = 0; i < L; i++) {
-            int d = left ? i : L - 1 - i;              // distance from the leading end
+            int d = faceLeft ? i : L - 1 - i;          // distance from the nose end
             int t = d < nose ? top + nose - d : top;   // sloped nose
-            box(x + i, t, 1, top + h - t, body);
+            box(x + i, t, 1, top + h - t, locoBody);
           }
           int cw = std::max(3, h / 3);
-          box(left ? x + nose - 1 : x + L - nose - cw + 1, top + h / 4 + 1, cw, std::max(2, h / 4), dark);
-          box(x, top + h * 3 / 5, L, s, st1);
+          box(faceLeft ? x + nose - 1 : x + L - nose - cw + 1, top + h / 4 + 1, cw, std::max(2, h / 4), metra ? glass : dark);
+          box(x, top + h * 3 / 5, L, s, locoSt1);
           box(x, top + h * 3 / 5 + s, L, 1, st2);
-          box(left ? x + 1 : x + L - 3, top + h - std::max(3, h / 4), 2, 2, lamp);
+          box(faceLeft ? x + 1 : x + L - 3, top + h - std::max(3, h / 4), 2, 2, lamp);
           wheels(x, top, L, h);
         };
         auto track = [&](int y) {
@@ -1072,12 +1091,18 @@ display:
           // Leading end first: westbound enters from the right.
           int x = left ? W - run : run - trainL;
           if (left) {
-            loco(x, top, locoL, h);
+            loco(x, top, locoL, h, true);
             for (int c = 0, cx = x + locoL + gap; c < cars; c++, cx += carL + gap) car(cx, top, carL, h);
+          } else if (metra) {
+            // Push-pull: the loco stays on the Aurora end, the cab car leads.
+            loco(x, top, locoL, h, true);
+            int cx = x + locoL + gap;
+            for (int c = 0; c < cars; c++, cx += carL + gap) car(cx, top, carL, h);
+            box(cx - gap - 3, top + h - 5, 2, 2, lamp);
           } else {
             int cx = x;
             for (int c = 0; c < cars; c++, cx += carL + gap) car(cx, top, carL, h);
-            loco(cx, top, locoL, h);
+            loco(cx, top, locoL, h, false);
           }
           return;
         }
@@ -1089,12 +1114,13 @@ display:
           track(41);
           int off = (int) (el * 0.05f) % step;
           for (int x = left ? -off : off - step; x < 64; x += step) car(x, 22, sL, sh);
-          it.print(32, 50, id(f8), id(c_red), TextAlign::TOP_CENTER, id(tr_operator).c_str());
+          it.print(32, 50, id(f8), metra ? Color(40, 100, 230) : id(c_red), TextAlign::TOP_CENTER,
+                   id(tr_operator).c_str());
           for (int y = 0; y < 64; y += 2) it.draw_pixel_at(64, y, id(c_gray));
         }
         marquee(x0, xr, 0, id(f16), id(c_amber), id(tr_name));
         it.printf(x0, 19, id(f8), id(c_white), TextAlign::TOP_LEFT, "#%d  %s", id(tr_number),
-                  id(tr_west) ? "WESTBOUND" : "EASTBOUND");
+                  metra ? (id(tr_west) ? "OUTBOUND" : "INBOUND") : (id(tr_west) ? "WESTBOUND" : "EASTBOUND"));
         std::string dest = "TO " + id(tr_dest);
         for (auto &ch : dest) ch = toupper(ch);
         marquee(x0, xr, 31, id(f8), id(c_white), dest);
