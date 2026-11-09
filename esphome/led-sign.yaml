@@ -21,9 +21,12 @@
 #                     us_score, opp_score, status, down_text, possession,
 #                     channel, us_color, us_alt, opp_color, opp_alt
 #   clear_game
+#   show_leave        title, at, leave_ts, start_ts, drive, traffic
+#                     (leave_ts/start_ts unix seconds, drive/traffic minutes)
+#   clear_leave
 #
 # Full-screen moments, in priority order: timer's last minute / TIME'S UP,
-# message, train passing, touchdown, scoreboard after a score, final score,
+# message, train passing, leave-by countdown, touchdown, scoreboard after a score, final score,
 # plane overhead. Otherwise the screen is shared: music (or the clock and
 # weather), with a timer bar on top while a timer runs and a Bears strip
 # along the bottom during the game.
@@ -92,6 +95,28 @@ api:
     - action: clear_timer
       then:
         - lambda: 'id(timer_end) = 0;'
+    # Leave-by countdown for the next calendar event with an address. HA
+    # works out the drive (Waze, live traffic) and the time to leave; the
+    # sign counts down to leave_ts on its own and stops at start_ts.
+    - action: show_leave
+      variables:
+        title: string
+        at: string
+        leave_ts: int
+        start_ts: int
+        drive: int
+        traffic: int
+      then:
+        - lambda: |-
+            id(lv_title) = title;
+            id(lv_at) = at;
+            id(lv_leave) = leave_ts;
+            id(lv_start) = start_ts;
+            id(lv_drive) = drive;
+            id(lv_traffic) = traffic;
+    - action: clear_leave
+      then:
+        - lambda: 'id(lv_start) = 0;'
     - action: show_train
       variables:
         company: string
@@ -294,6 +319,23 @@ globals:
     type: int64_t
     initial_value: '0'
   - id: timer_duration
+    type: int
+    initial_value: '0'
+  # Leave-by countdown (pushed from HA)
+  - id: lv_title
+    type: std::string
+  - id: lv_at          # event start as text, e.g. "8:00"
+    type: std::string
+  - id: lv_leave
+    type: int64_t
+    initial_value: '0'
+  - id: lv_start       # 0 = nothing to show
+    type: int64_t
+    initial_value: '0'
+  - id: lv_drive       # minutes with live traffic
+    type: int
+    initial_value: '0'
+  - id: lv_traffic     # minutes traffic adds over a normal drive
     type: int
     initial_value: '0'
   # Plane overhead (pushed from HA)
@@ -1130,6 +1172,60 @@ display:
           it.printf(xr, 52, id(f8), id(c_red), TextAlign::TOP_RIGHT, "%d MIN LATE", id(tr_late));
         else
           it.print(xr, 52, id(f8), id(c_green), TextAlign::TOP_RIGHT, "ON TIME");
+        return;
+      }
+
+      // ---- Leave-by countdown: green, then yellow under 20 min, orange
+      // under 10, then a flashing GO NOW and LATE until the event starts ----
+      if (wide && id(lv_start) > ts) {
+        const int64_t until = id(lv_leave) - ts;
+        const int m = until > 0 ? (int) ((until + 59) / 60) : -(int) (-until / 60);
+        const Color c = m > 20 ? Color(40, 220, 90) : m > 10 ? Color(255, 210, 40)
+                      : m > 0 ? Color(255, 130, 20) : id(c_red);
+        const bool blink = (millis() / 500) % 2 == 0;
+        auto box = [&](int x, int y, int w, int h, Color col) { it.filled_rectangle(x, y, w, h, col); };
+        // Side-view car, 21 x 11, at (6, 8).
+        {
+          const int x = 6, y = 8;
+          const Color glass(40, 55, 80), tyre(90, 90, 90), hub(30, 30, 30);
+          box(x + 5, y, 10, 1, c); box(x + 4, y + 1, 12, 1, c);
+          box(x + 3, y + 2, 2, 3, c); box(x + 15, y + 2, 2, 3, c); box(x + 10, y + 1, 1, 4, c);
+          box(x + 5, y + 2, 4, 3, glass); box(x + 11, y + 2, 4, 3, glass);
+          box(x, y + 5, 21, 4, c);
+          box(x + 19, y + 6, 2, 1, Color(255, 220, 60)); box(x, y + 6, 1, 1, id(c_red));
+          for (int wx : {x + 3, x + 14}) { box(wx, y + 8, 4, 3, tyre); box(wx + 1, y + 9, 2, 1, hub); }
+        }
+        if (id(lv_drive) > 0) {
+          if (id(lv_traffic) >= 2) {
+            char t[8];
+            snprintf(t, sizeof t, "+%d", id(lv_traffic));
+            txt(6, 26, id(f8), Color(255, 130, 20), TextAlign::TOP_LEFT, t);
+          } else {
+            txt(6, 26, id(f8), id(c_green), TextAlign::TOP_LEFT, "CLEAR");
+          }
+          txt(6, 35, id(f8), id(c_dim), TextAlign::TOP_LEFT, "TRAFFIC");
+        }
+        char big[12];
+        if (m > 0) {
+          if (m < 100) snprintf(big, sizeof big, "%d MIN", m);
+          else snprintf(big, sizeof big, "%dH%02d", m / 60, m % 60);
+          txt(118, 2, id(f8), id(c_dim), TextAlign::TOP_CENTER, "LEAVE IN");
+          txt(118, 13, id(f32), c, TextAlign::TOP_CENTER, big);
+        } else {
+          if (m == 0) snprintf(big, sizeof big, "GO NOW");
+          else snprintf(big, sizeof big, "LATE %d", -m);
+          txt(118, 2, id(f8), blink ? id(c_red) : id(c_dim), TextAlign::TOP_CENTER, "TIME TO GO");
+          txt(118, 13, id(f32), blink ? id(c_red) : Color(120, 20, 15), TextAlign::TOP_CENTER, big);
+        }
+        it.horizontal_line(0, 53, W, Color(35, 35, 35));
+        char drv[20];
+        if (id(lv_drive) > 0) snprintf(drv, sizeof drv, "%d MIN DRIVE", id(lv_drive));
+        else snprintf(drv, sizeof drv, "NO ROUTE");
+        const int dw = text_w(id(f8), drv);
+        txt(W - 3, 56, id(f8), id(c_dim), TextAlign::TOP_RIGHT, drv);
+        std::string line = and_fix(id(lv_title));
+        if (!id(lv_at).empty()) line += " " + id(lv_at);
+        mq(3, W - 3 - dw - 8, 56, id(f8), id(c_white), line);
         return;
       }
 
