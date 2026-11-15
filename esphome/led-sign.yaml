@@ -3,29 +3,25 @@
 # Panels get 5V from the MEAN WELL through their own red/black leads; leave
 # the Matrix Portal's screw terminals empty while it's on USB-C.
 #
-# The sign only draws. Home Assistant (packages/led_sign.yaml in the HA repo)
-# fetches weather, planes and Amtrak, does the math, and pushes results here.
+# The sign only draws. Home Assistant (packages/led_sign*.yaml in the HA repo)
+# fetches weather, planes, trains and scores and does the math.
 # The clock comes from network time with Home Assistant as a backup.
 #
-# Actions HA calls (esphome.led_sign_<name>):
-#   show_message      line1, line2, seconds
-#   show_timer        label, remaining, duration   (seconds)
-#   clear_timer
-#   show_train        company, name, train_number, westbound, dest, late, seconds
-#   show_plane        flight, aircraft, route, airline, altitude, rate, speed,
-#                     track, dx, dy, radius        (dx/dy/radius in miles)
-#   clear_plane
-#   show_now_playing  title, artist, source, art_url
-#   clear_now_playing
-#   show_game         game_state (pre/in/post), kickoff, opponent, at_home,
-#                     us_score, opp_score, status, down_text, possession,
-#                     channel, us_color, us_alt, opp_color, opp_alt
-#   clear_game
-#   show_leave        title, at, leave_ts, start_ts, drive, traffic
-#                     (leave_ts/start_ts unix seconds, drive/traffic minutes)
-#   clear_leave
+# Nothing is pushed: the sign reads its screens from HA sensors, so a
+# rebooted sign catches up by itself and HA needs no "send to sign"
+# automations. Each sensor is "none" when there is nothing to show.
+#   sensor.led_sign_train        COMPANY|NAME|NUMBER|W/E|DEST|LATE|UNTIL_TS
+#   sensor.led_sign_plane        FLIGHT|TYPE|ROUTE|AIRLINE|ALT|RATE|SPEED|TRACK|DX|DY|RADIUS
+#   sensor.led_sign_timer        LABEL|END_TS|DURATION
+#   sensor.led_sign_leave        TITLE|AT|LEAVE_TS|START_TS|DRIVE|TRAFFIC
+#   sensor.led_sign_now_playing  TITLE|ARTIST   (attribute art_url)
+#   sensor.led_sign_bears_game   the ESPN summary, held back on the sign by
+#                                input_number.led_sign_bears_delay (spoilers)
+#   sensor.led_sign_alerts       see below
+# One action is left for one-off messages: esphome.led_sign_show_message
+# (line1, line2, seconds).
 #
-# Alerts are not pushed: the sign reads sensor.led_sign_alerts from HA
+# Alerts: sensor.led_sign_alerts
 # ("TITLE|DETAIL|ICON;TITLE|DETAIL|ICON" or "none", up to 4). A new alert
 # takes the whole sign for 10 s; after that each one is a card on the clock
 # screen (a tag on the music screen) until HA drops it from the list.
@@ -90,180 +86,6 @@ api:
             id(msg_line1) = line1;
             id(msg_line2) = line2;
             id(msg_until) = id(sntp_time).now().timestamp + (seconds > 0 ? seconds : 30);
-    - action: show_timer
-      variables:
-        label: string
-        remaining: int
-        duration: int
-      then:
-        - lambda: |-
-            id(timer_label) = label.empty() ? std::string("TIMER") : label;
-            id(timer_end) = id(sntp_time).now().timestamp + remaining;
-            id(timer_duration) = duration > 0 ? duration : remaining;
-    - action: clear_timer
-      then:
-        - lambda: 'id(timer_end) = 0;'
-    # Leave-by countdown for the next calendar event with an address. HA
-    # works out the drive (Waze, live traffic) and the time to leave; the
-    # sign counts down to leave_ts on its own and stops at start_ts.
-    - action: show_leave
-      variables:
-        title: string
-        at: string
-        leave_ts: int
-        start_ts: int
-        drive: int
-        traffic: int
-      then:
-        - lambda: |-
-            id(lv_title) = title;
-            id(lv_at) = at;
-            id(lv_leave) = leave_ts;
-            id(lv_start) = start_ts;
-            id(lv_drive) = drive;
-            id(lv_traffic) = traffic;
-    - action: clear_leave
-      then:
-        - lambda: 'id(lv_start) = 0;'
-    - action: show_train
-      variables:
-        company: string
-        name: string
-        train_number: int
-        westbound: bool
-        dest: string
-        late: int
-        seconds: int
-      then:
-        - lambda: |-
-            // A new train (not a refresh of the one showing) restarts the
-            // full-width entrance animation.
-            if (id(tr_until) <= id(sntp_time).now().timestamp || train_number != id(tr_number))
-              id(tr_start) = millis();
-            id(tr_operator) = company;
-            id(tr_name) = name;
-            id(tr_number) = train_number;
-            id(tr_west) = westbound;
-            id(tr_dest) = dest;
-            id(tr_late) = late;
-            id(tr_until) = id(sntp_time).now().timestamp + (seconds > 0 ? seconds : 60);
-    - action: show_plane
-      variables:
-        flight: string
-        aircraft: string
-        route: string
-        airline: string
-        altitude: int
-        rate: int
-        speed: float
-        track: float
-        dx: float
-        dy: float
-        radius: float
-      then:
-        - lambda: |-
-            if (flight != id(pl_flight)) id(pl_trail).clear();
-            id(pl_flight) = flight;
-            id(pl_type) = aircraft;
-            id(pl_route) = route;
-            id(pl_airline) = airline;
-            id(pl_alt) = altitude;
-            id(pl_rate) = rate;
-            id(pl_gs) = speed;
-            id(pl_track) = track;
-            id(pl_dx) = dx;
-            id(pl_dy) = dy;
-            id(pl_radius) = radius > 0 ? radius : 1.5f;
-            id(pl_trail).push_back({dx, dy});
-            if (id(pl_trail).size() > 8) id(pl_trail).erase(id(pl_trail).begin());
-            id(pl_last_seen) = id(sntp_time).now().timestamp;
-            id(pl_ms) = millis();
-    - action: clear_plane
-      then:
-        - lambda: |-
-            id(pl_last_seen) = 0;
-            id(pl_flight).clear();
-    - action: show_now_playing
-      variables:
-        title: string
-        artist: string
-        source: string
-        art_url: string
-      then:
-        - lambda: |-
-            id(np_title) = title;
-            id(np_artist) = artist;
-            id(np_source) = source;
-            id(np_active) = true;
-        - if:
-            condition:
-              lambda: 'return art_url != id(np_art_url);'
-            then:
-              - lambda: |-
-                  id(np_art_url) = art_url;
-                  id(np_art_ok) = false;
-              - if:
-                  condition:
-                    lambda: 'return !art_url.empty();'
-                  then:
-                    - online_image.set_url:
-                        id: album_art
-                        url: !lambda 'return art_url;'
-                    - component.update: album_art
-    - action: clear_now_playing
-      then:
-        - lambda: 'id(np_active) = false;'
-    # Bears game (HA, from ESPN). Score changes trigger the touchdown /
-    # scoreboard screens; the end of a game triggers the final-score screen.
-    - action: show_game
-      variables:
-        game_state: string
-        kickoff: string
-        opponent: string
-        at_home: bool
-        us_score: int
-        opp_score: int
-        status: string
-        down_text: string
-        possession: int
-        channel: string
-        us_color: string
-        us_alt: string
-        opp_color: string
-        opp_alt: string
-      then:
-        - lambda: |-
-            const int64_t t = id(sntp_time).now().timestamp;
-            if (game_state == "in" && id(g_state) == "in" && opponent == id(g_opp)) {
-              if (us_score - id(g_us) >= 6) {
-                id(g_td_until) = t + 10;
-                id(g_b1_until) = t + 25;
-              } else if (us_score != id(g_us) || opp_score != id(g_them)) {
-                id(g_b1_until) = t + 15;
-              }
-            }
-            if (game_state == "post" && id(g_state) == "in") id(g_b6_until) = t + 900;
-            id(g_state) = game_state;
-            id(g_kick) = kickoff;
-            id(g_opp) = opponent;
-            id(g_home) = at_home;
-            id(g_us) = us_score;
-            id(g_them) = opp_score;
-            id(g_status) = status;
-            id(g_down) = down_text;
-            id(g_poss) = possession;
-            id(g_channel) = channel;
-            id(g_us_c) = us_color;
-            id(g_us_a) = us_alt;
-            id(g_opp_c) = opp_color;
-            id(g_opp_a) = opp_alt;
-    - action: clear_game
-      then:
-        - lambda: |-
-            id(g_state).clear();
-            id(g_td_until) = 0;
-            id(g_b1_until) = 0;
-            id(g_b6_until) = 0;
 
 ota:
   - platform: esphome
@@ -344,7 +166,7 @@ globals:
   - id: al_flash_until
     type: int64_t
     initial_value: '0'
-  # Leave-by countdown (pushed from HA)
+  # Leave-by countdown (read from HA)
   - id: lv_title
     type: std::string
   - id: lv_at          # event start as text, e.g. "8:00"
@@ -361,7 +183,7 @@ globals:
   - id: lv_traffic     # minutes traffic adds over a normal drive
     type: int
     initial_value: '0'
-  # Plane overhead (pushed from HA)
+  # Plane overhead (read from HA)
   - id: pl_flight
     type: std::string
   - id: pl_type
@@ -399,7 +221,7 @@ globals:
     initial_value: '0'
   - id: pl_trail
     type: std::vector<std::pair<float, float>>
-  # Train passing (pushed from HA)
+  # Train passing (read from HA)
   - id: tr_operator
     type: std::string
   - id: tr_name
@@ -421,7 +243,7 @@ globals:
   - id: tr_start       # millis() when the current train arrived (animation clock)
     type: uint32_t
     initial_value: '0'
-  # Now playing (pushed from HA)
+  # Now playing (read from HA)
   - id: np_active
     type: bool
     initial_value: 'false'
@@ -436,7 +258,13 @@ globals:
   - id: np_art_ok
     type: bool
     initial_value: 'false'
-  # Bears game (pushed from HA)
+  - id: np_off_at      # music stopped: take the screen down at this time (0 = no)
+    type: int64_t
+    initial_value: '0'
+  # Bears updates waiting out the spoiler delay: {apply at, ESPN summary}
+  - id: g_queue
+    type: std::vector<std::pair<int64_t, std::string>>
+  # Bears game (read from HA)
   - id: g_state   # "pre", "in", "post", or empty = no game today
     type: std::string
   - id: g_kick
@@ -564,6 +392,11 @@ sensor:
     internal: true
     on_value:
       - lambda: 'if (!std::isnan(x)) id(wx_lvl) = (int) x;'
+  # Seconds to hold Bears updates back so the sign doesn't beat the TV.
+  - platform: homeassistant
+    id: ha_bears_delay
+    entity_id: input_number.led_sign_bears_delay
+    internal: true
   # Tomorrow's forecast (evening card)
   - platform: homeassistant
     id: ha_tm_hi
@@ -662,13 +495,192 @@ text_sensor:
           }
           id(al_ready) = true;
           id(al_list) = list;
+  # ---- Screens read from HA. "none" = nothing to show; unavailable /
+  # unknown (HA restarting) are ignored so what's on screen stays. ----
+  # Train passing: COMPANY|NAME|NUMBER|W/E|DEST|LATE|UNTIL_TS
+  - platform: homeassistant
+    id: ha_train
+    entity_id: sensor.led_sign_train
+    internal: true
+    on_value:
+      - lambda: |-
+          std::vector<std::string> p;
+          for (size_t a = 0;;) {
+            const size_t b = x.find('|', a);
+            p.push_back(x.substr(a, b == std::string::npos ? b : b - a));
+            if (b == std::string::npos) break;
+            a = b + 1;
+          }
+          if (p.size() < 7) return;      // the train on screen runs out by itself
+          const int64_t now = id(sntp_time).now().timestamp;
+          const int number = atoi(p[2].c_str());
+          // A new train (not a refresh of the one showing) restarts the
+          // full-width entrance animation.
+          if (id(tr_until) <= now || number != id(tr_number)) id(tr_start) = millis();
+          id(tr_operator) = p[0];
+          id(tr_name) = p[1];
+          id(tr_number) = number;
+          id(tr_west) = p[3] == "W";
+          id(tr_dest) = p[4];
+          id(tr_late) = atoi(p[5].c_str());
+          id(tr_until) = std::max((int64_t) atoll(p[6].c_str()), now + 15);
+  # Plane overhead: FLIGHT|TYPE|ROUTE|AIRLINE|ALT|RATE|SPEED|TRACK|DX|DY|RADIUS
+  # (dx/dy/radius in miles), refreshed every 10 s while a plane is in range.
+  - platform: homeassistant
+    id: ha_plane
+    entity_id: sensor.led_sign_plane
+    internal: true
+    on_value:
+      - lambda: |-
+          std::vector<std::string> p;
+          for (size_t a = 0;;) {
+            const size_t b = x.find('|', a);
+            p.push_back(x.substr(a, b == std::string::npos ? b : b - a));
+            if (b == std::string::npos) break;
+            a = b + 1;
+          }
+          if (p.size() < 11) {
+            if (x == "none") {
+              id(pl_last_seen) = 0;
+              id(pl_flight).clear();
+            }
+            return;
+          }
+          const float dx = atof(p[8].c_str()), dy = atof(p[9].c_str()), radius = atof(p[10].c_str());
+          if (p[0] != id(pl_flight)) id(pl_trail).clear();
+          id(pl_flight) = p[0];
+          id(pl_type) = p[1];
+          id(pl_route) = p[2];
+          id(pl_airline) = p[3];
+          id(pl_alt) = atoi(p[4].c_str());
+          id(pl_rate) = atoi(p[5].c_str());
+          id(pl_gs) = atof(p[6].c_str());
+          id(pl_track) = atof(p[7].c_str());
+          id(pl_dx) = dx;
+          id(pl_dy) = dy;
+          id(pl_radius) = radius > 0 ? radius : 1.5f;
+          id(pl_trail).push_back({dx, dy});
+          if (id(pl_trail).size() > 8) id(pl_trail).erase(id(pl_trail).begin());
+          id(pl_last_seen) = id(sntp_time).now().timestamp;
+          id(pl_ms) = millis();
+  # Kitchen timer: LABEL|END_TS|DURATION. The sign counts down by itself and
+  # shows TIME'S UP for a minute, so "none" only clears a timer that still
+  # had time on it (cancelled early).
+  - platform: homeassistant
+    id: ha_timer
+    entity_id: sensor.led_sign_timer
+    internal: true
+    on_value:
+      - lambda: |-
+          std::vector<std::string> p;
+          for (size_t a = 0;;) {
+            const size_t b = x.find('|', a);
+            p.push_back(x.substr(a, b == std::string::npos ? b : b - a));
+            if (b == std::string::npos) break;
+            a = b + 1;
+          }
+          const int64_t now = id(sntp_time).now().timestamp;
+          if (p.size() < 3) {
+            if (x == "none" && id(timer_end) > now + 5) id(timer_end) = 0;
+            return;
+          }
+          const int64_t end = atoll(p[1].c_str());
+          const int duration = atoi(p[2].c_str());
+          id(timer_label) = p[0].empty() ? std::string("TIMER") : p[0];
+          id(timer_end) = end;
+          id(timer_duration) = duration > 0 ? duration : (int) (end - now);
+  # Leave-by countdown: TITLE|AT|LEAVE_TS|START_TS|DRIVE|TRAFFIC (unix
+  # seconds, minutes). HA works out the drive and when to leave; the sign
+  # counts down to leave_ts on its own and stops at start_ts.
+  - platform: homeassistant
+    id: ha_leave
+    entity_id: sensor.led_sign_leave
+    internal: true
+    on_value:
+      - lambda: |-
+          std::vector<std::string> p;
+          for (size_t a = 0;;) {
+            const size_t b = x.find('|', a);
+            p.push_back(x.substr(a, b == std::string::npos ? b : b - a));
+            if (b == std::string::npos) break;
+            a = b + 1;
+          }
+          if (p.size() < 6) {
+            if (x == "none") id(lv_start) = 0;
+            return;
+          }
+          id(lv_title) = p[0];
+          id(lv_at) = p[1];
+          id(lv_leave) = atoll(p[2].c_str());
+          id(lv_start) = atoll(p[3].c_str());
+          id(lv_drive) = atoi(p[4].c_str());
+          id(lv_traffic) = atoi(p[5].c_str());
+  # Now playing on the kitchen speakers: TITLE|ARTIST. The screen stays up
+  # 15 s after the music stops (pauses between tracks).
+  - platform: homeassistant
+    id: ha_np
+    entity_id: sensor.led_sign_now_playing
+    internal: true
+    on_value:
+      - lambda: |-
+          if (x == "unavailable" || x == "unknown") return;
+          if (x == "none" || x.empty()) {
+            if (id(np_active) && id(np_off_at) == 0) id(np_off_at) = id(sntp_time).now().timestamp + 15;
+            return;
+          }
+          const size_t bar = x.find('|');
+          id(np_title) = x.substr(0, bar);
+          id(np_artist) = bar == std::string::npos ? std::string() : x.substr(bar + 1);
+          id(np_source) = "KITCHEN";
+          id(np_active) = true;
+          id(np_off_at) = 0;
+  # Album art for the track above: a URL the sign downloads itself, "-" when
+  # the track has none, empty when nothing is playing (the last art stays).
+  - platform: homeassistant
+    id: ha_np_art
+    entity_id: sensor.led_sign_now_playing
+    attribute: art_url
+    internal: true
+    on_value:
+      - if:
+          condition:
+            lambda: 'return !x.empty() && x != "unavailable" && x != "unknown" && x != "None" && x != id(np_art_url);'
+          then:
+            - lambda: |-
+                id(np_art_url) = x;
+                id(np_art_ok) = false;
+            - if:
+                condition:
+                  lambda: 'return x != "-";'
+                then:
+                  - online_image.set_url:
+                      id: album_art
+                      url: !lambda 'return x;'
+                  - component.update: album_art
+  # Bears game: HA's ESPN summary, queued here for the spoiler delay and
+  # applied by the 1 s interval below.
+  # state|kickoff|opponent|H/A|chi_score|opp_score|status|down|possession
+  # |channel|chi_color|chi_alt|opp_color|opp_alt|kickoff_ts   (or none)
+  - platform: homeassistant
+    id: ha_bears
+    entity_id: sensor.led_sign_bears_game
+    internal: true
+    on_value:
+      - lambda: |-
+          if (x == "unavailable" || x == "unknown" || x.empty()) return;
+          // Live and final scores wait out the delay; previews and "none" don't.
+          const bool hold = x.rfind("in|", 0) == 0 || x.rfind("post|", 0) == 0;
+          const float d = id(ha_bears_delay).state;
+          const int64_t at = id(sntp_time).now().timestamp + (hold && !std::isnan(d) ? (int) d : 0);
+          if (id(g_queue).size() >= 16) id(g_queue).erase(id(g_queue).begin());
+          id(g_queue).push_back({at, x});
   - platform: debug
     reset_reason:
       name: "Last restart reason"
 
 binary_sensor:
   # On from 6 PM the night before pickup until the bins are marked out
-  # (HA's "Trash night reminder" automation).
+  # (HA's "Trash - Night-before reminder" automation).
   - platform: homeassistant
     id: ha_trash
     entity_id: input_boolean.trash_reminder
@@ -677,7 +689,7 @@ binary_sensor:
 image:
   - platform: online_image
     id: album_art
-    url: "http://localhost/none.jpg"   # replaced by show_now_playing
+    url: "http://localhost/none.jpg"   # replaced by the now-playing art URL
     format: JPEG
     type: RGB565
     resize: 64x64
@@ -818,6 +830,60 @@ interval:
           static uint8_t tick = 0;
           bool animating = id(show_trains).state && id(tr_until) > id(sntp_time).now().timestamp;
           if (animating || ++tick % 2 == 0) id(sign).update();
+  - interval: 1s
+    then:
+      - lambda: |-
+          const int64_t t = id(sntp_time).now().timestamp;
+          // Music stopped 15 s ago: back to the clock.
+          if (id(np_off_at) > 0 && t >= id(np_off_at)) {
+            id(np_active) = false;
+            id(np_off_at) = 0;
+          }
+          // Bears updates whose spoiler delay is over, oldest first. Score
+          // changes trigger the touchdown / scoreboard screens; the end of
+          // a game triggers the final-score screen.
+          while (!id(g_queue).empty() && id(g_queue).front().first <= t) {
+            const std::string x = id(g_queue).front().second;
+            id(g_queue).erase(id(g_queue).begin());
+            std::vector<std::string> p;
+            for (size_t a = 0;;) {
+              const size_t b = x.find('|', a);
+              p.push_back(x.substr(a, b == std::string::npos ? b : b - a));
+              if (b == std::string::npos) break;
+              a = b + 1;
+            }
+            if (p.size() < 15) {          // "none": no game today
+              id(g_state).clear();
+              id(g_td_until) = 0;
+              id(g_b1_until) = 0;
+              id(g_b6_until) = 0;
+              continue;
+            }
+            const int us_score = atoi(p[4].c_str()), opp_score = atoi(p[5].c_str());
+            if (p[0] == "in" && id(g_state) == "in" && p[2] == id(g_opp)) {
+              if (us_score - id(g_us) >= 6) {
+                id(g_td_until) = t + 10;
+                id(g_b1_until) = t + 25;
+              } else if (us_score != id(g_us) || opp_score != id(g_them)) {
+                id(g_b1_until) = t + 15;
+              }
+            }
+            if (p[0] == "post" && id(g_state) == "in") id(g_b6_until) = t + 900;
+            id(g_state) = p[0];
+            id(g_kick) = p[1];
+            id(g_opp) = p[2];
+            id(g_home) = p[3] == "H";
+            id(g_us) = us_score;
+            id(g_them) = opp_score;
+            id(g_status) = p[6];
+            id(g_down) = p[7];
+            id(g_poss) = atoi(p[8].c_str());
+            id(g_channel) = p[9];
+            id(g_us_c) = p[10];
+            id(g_us_a) = p[11];
+            id(g_opp_c) = p[12];
+            id(g_opp_a) = p[13];
+          }
 
 display:
   - platform: hub75
