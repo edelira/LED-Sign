@@ -25,8 +25,14 @@
 #                     (leave_ts/start_ts unix seconds, drive/traffic minutes)
 #   clear_leave
 #
+# Alerts are not pushed: the sign reads sensor.led_sign_alerts from HA
+# ("TITLE|DETAIL;TITLE|DETAIL" or "none", up to 4). A new alert takes the
+# whole sign for 10 s; after that each one is a card on the clock screen (a
+# tag on the music screen) until HA drops it from the list. Adding an alert
+# is a change in HA only (packages/led_sign.yaml).
+#
 # Full-screen moments, in priority order: timer's last minute / TIME'S UP,
-# message, train passing, leave-by countdown, touchdown, scoreboard after a score, final score,
+# message, new alert, train passing, leave-by countdown, touchdown, scoreboard after a score, final score,
 # plane overhead. Otherwise the screen is shared: music (or the clock and
 # weather), with a timer bar on top while a timer runs and a Bears strip
 # along the bottom during the game.
@@ -321,6 +327,19 @@ globals:
   - id: timer_duration
     type: int
     initial_value: '0'
+  # Alerts (read from HA's sensor.led_sign_alerts): title + detail each
+  - id: al_list
+    type: std::vector<std::pair<std::string, std::string>>
+  - id: al_ready       # false until the first list after boot (no flash for old alerts)
+    type: bool
+    initial_value: 'false'
+  - id: al_flash_1
+    type: std::string
+  - id: al_flash_2
+    type: std::string
+  - id: al_flash_until
+    type: int64_t
+    initial_value: '0'
   # Leave-by countdown (pushed from HA)
   - id: lv_title
     type: std::string
@@ -592,6 +611,45 @@ text_sensor:
           };
           for (const auto &w : table)
             if (x == w.ha) { id(tm_label) = w.label; id(tm_code) = w.code; break; }
+  # What needs attention right now, worked out in HA:
+  # "TITLE|DETAIL;TITLE|DETAIL" or "none". See the note at the top.
+  - platform: homeassistant
+    id: ha_alerts
+    entity_id: sensor.led_sign_alerts
+    internal: true
+    on_value:
+      - lambda: |-
+          // HA restarting: keep what's showing.
+          if (x == "unavailable" || x == "unknown") return;
+          std::vector<std::pair<std::string, std::string>> list;
+          if (x != "none") {
+            size_t a = 0;
+            while (a < x.size() && list.size() < 4) {
+              size_t b = x.find(';', a);
+              if (b == std::string::npos) b = x.size();
+              const std::string item = x.substr(a, b - a);
+              const size_t bar = item.find('|');
+              const std::string l1 = item.substr(0, bar);
+              if (!l1.empty())
+                list.push_back({l1, bar == std::string::npos ? std::string() : item.substr(bar + 1)});
+              a = b + 1;
+            }
+          }
+          // An alert that wasn't in the last list gets the full screen for 10 s.
+          if (id(al_ready)) {
+            for (const auto &n : list) {
+              bool had = false;
+              for (const auto &o : id(al_list)) had = had || o == n;
+              if (!had) {
+                id(al_flash_1) = n.first;
+                id(al_flash_2) = n.second;
+                id(al_flash_until) = id(sntp_time).now().timestamp + 10;
+                break;
+              }
+            }
+          }
+          id(al_ready) = true;
+          id(al_list) = list;
   - platform: debug
     reset_reason:
       name: "Last restart reason"
@@ -1042,6 +1100,14 @@ display:
         return;
       }
 
+      // ---- New alert from HA's list: full screen for 10 s ----
+      if (id(al_flash_until) > ts) {
+        it.rectangle(0, 0, W, 64, id(c_amber));
+        it.print(W / 2, 22, id(f16), id(c_amber), TextAlign::CENTER, id(al_flash_1).c_str());
+        it.print(W / 2, 44, id(f16), id(c_white), TextAlign::CENTER, id(al_flash_2).c_str());
+        return;
+      }
+
       // ---- Train passing ----
       if (id(show_trains).state && id(tr_until) > ts) {
         const bool wide = W >= 192;
@@ -1421,9 +1487,17 @@ display:
           it.horizontal_line(x0 - 4, 40, xr - x0 + 6, line_c);
           txt(x0, 47, id(f16), id(c_amber), TextAlign::TOP_LEFT, hm);
           txt(x0 + text_w(id(f16), hm) + 5, 47, id(f8), id(c_dim), TextAlign::TOP_LEFT, ampm);
-          // The night before pickup, a green TRASH / TMRW tag takes the
-          // weather's spot every other 8 s (or for good if there's no weather).
-          if (id(ha_trash).state && (!have_wx || (millis() / 8000) % 2)) {
+          // The weather's spot is shared, 8 s each: weather, a green
+          // TRASH / TMRW tag the night before pickup, and one amber tag
+          // per alert from HA.
+          const int n_al = id(al_list).size();
+          const int slots = (have_wx ? 1 : 0) + (id(ha_trash).state ? 1 : 0) + n_al;
+          int pick = slots > 0 ? (int) ((millis() / 8000) % slots) : -1;
+          const bool show_wx = have_wx && pick == 0;
+          if (have_wx) pick--;
+          const bool show_trash = id(ha_trash).state && pick == 0;
+          if (id(ha_trash).state) pick--;
+          if (show_trash) {
             const Color tag_bg(15, 60, 30), tag_fg(60, 200, 100);
             it.filled_rectangle(xr - 44, 45, 46, 15, tag_bg);     // clears "12:59 PM"
             it.filled_rectangle(xr - 41, 47, 7, 2, tag_fg);       // lid
@@ -1432,9 +1506,14 @@ display:
             it.horizontal_line(xr - 39, 54, 3, tag_bg);
             txt(xr - 31, 46, id(f8), tag_fg, TextAlign::TOP_LEFT, "TRASH");
             txt(xr - 31, 53, id(f8), tag_fg, TextAlign::TOP_LEFT, "TMRW");
-          } else if (have_wx) {
+          } else if (show_wx) {
             txt(xr, 47, id(f16), id(c_white), TextAlign::TOP_RIGHT, temp);
             wx_small(xr - text_w(id(f16), temp) - 10, 52);
+          } else if (pick >= 0 && pick < n_al) {
+            const auto &al = id(al_list)[pick];
+            it.filled_rectangle(xr - 44, 45, 46, 15, Color(60, 35, 0));
+            mq(xr - 42, xr, 46, id(f8), id(c_amber), al.first);
+            mq(xr - 42, xr, 53, id(f8), id(c_white), al.second);
           }
         } else {
           const int ty = top + (tbar ? 3 : 4);
@@ -1468,16 +1547,39 @@ display:
 
       // Third panel: rotating cards, 8 s each. Weather always; tomorrow's
       // forecast after 7 PM; the Bears preview on game day before kickoff;
-      // trash the night before pickup until the bins are out.
+      // trash the night before pickup until the bins are out; one card per
+      // alert from HA (C_ALERT + i).
       const int cx = 160;
-      enum { C_WX, C_TMRW, C_BEARS, C_TRASH };
-      int cards[4], n = 0;
+      enum { C_WX, C_TMRW, C_BEARS, C_TRASH, C_ALERT };
+      int cards[8], n = 0;
       cards[n++] = C_WX;
       if (now.hour >= 19 && id(tm_code) >= 0 && !std::isnan(id(ha_tm_hi).state)) cards[n++] = C_TMRW;
       if (gs == "pre") cards[n++] = C_BEARS;
       if (id(ha_trash).state) cards[n++] = C_TRASH;
+      for (int i = 0; i < (int) id(al_list).size() && i < 4; i++) cards[n++] = C_ALERT + i;
       const int card = cards[(millis() / 8000) % n];
       const bool full = !tbar && !strip;
+
+      if (card >= C_ALERT) {
+        const auto &al = id(al_list)[card - C_ALERT];
+        // Centred on the panel, or scrolling when it's too long for it.
+        auto fit = [&](int y, Color c, const std::string &s) {
+          if (text_w(id(f8), s) <= 60) txt(cx, y, id(f8), c, TextAlign::TOP_CENTER, s);
+          else mq(130, W - 2, y, id(f8), c, s);
+        };
+        if (full) {
+          // Amber disc with a "!"
+          it.filled_circle(cx, 18, 12, id(c_amber));
+          it.filled_rectangle(cx - 1, 10, 3, 10, Color(0, 0, 0));
+          it.filled_rectangle(cx - 1, 23, 3, 3, Color(0, 0, 0));
+          fit(40, id(c_white), al.first);
+          fit(52, id(c_amber), al.second);
+        } else {
+          fit(top + 4, id(c_white), al.first);
+          fit(top + 16, id(c_amber), al.second);
+        }
+        return;
+      }
 
       if (card == C_TRASH) {
         if (full) {
