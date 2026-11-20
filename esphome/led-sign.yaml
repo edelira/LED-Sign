@@ -2284,8 +2284,8 @@ display:
           return;
         }
         if (card == C_TMRW) {
-          // A faint panel and its own icon, so it doesn't read as the weather now.
-          if (bg_on) it.filled_rectangle(129, s_top, W - 129, s_bot - s_top + 1, Color(6, 6, 8));
+          // Its own icon and the TOMORROW label keep it apart from the weather now.
+          // (No shaded panel: even a very dim fill lights up as a gray block.)
           char hl[16];
           snprintf(hl, sizeof hl, "%.0f/%.0f", id(ha_tm_hi).state, id(ha_tm_lo).state);
           std::vector<Item> v;
