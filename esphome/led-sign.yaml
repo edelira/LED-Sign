@@ -1787,12 +1787,13 @@ display:
       const bool layered = !music && (theme || bg_on);
       const bool leaves = theme && th_nov && !music && room;
       // The frame steps aside for the timer bar (top) and the Bears strip
-      // (bottom); with music, no leaf garland over the song title.
-      const bool frame_top = theme && !tbar && (!music || th_dec);
+      // (bottom). Only December has a top edge (lights); November keeps the
+      // top clear (owner's call): falling leaves and the pile are enough.
+      const bool frame_top = theme && th_dec && !tbar;
       const bool frame_bot = theme && !strip;
       const int fx0 = music ? 64 : 0;
       // Rows the right-hand cards may use, between the bars / the frame.
-      const int s_top = tbar ? 17 : (frame_top ? (th_dec ? 7 : 9) : 1);
+      const int s_top = tbar ? 17 : (frame_top ? 7 : 1);
       const int s_bot = strip ? 49 : (frame_bot ? 57 : 62);
       const int sky_y0 = tbar ? 16 : 0, sky_y1 = strip ? 50 : 63;
       id(fx_fast) = bg_on || leaves;
@@ -1953,20 +1954,13 @@ display:
         it.end_clipping();
       }
       // The frame along the top and bottom edges.
-      if (frame_top) {
-        if (th_dec) {
-          // Christmas lights on a sagging wire, chasing.
-          const Color bulbs[4] = {Color(230, 30, 40), Color(40, 230, 80), gold, Color(60, 120, 255)};
-          const int chase = millis() / 250;
-          for (int i = 0, x = fx0; x < W; i++, x += 8) {
-            for (int dx = 0; dx < 8; dx++) it.draw_pixel_at(x + dx, (dx >= 2 && dx <= 5) ? 1 : 0, Color(40, 60, 40));
-            it.filled_rectangle(x + 3, 2, 2, 3, (i + chase) % 3 ? bulbs[i % 4] : dimc(bulbs[i % 4], 0.3f));
-          }
-        } else {
-          // Leaf garland.
-          for (int x = fx0; x < W; x += 2) it.draw_pixel_at(x, 1 + (int) (1.5f + 1.5f * sinf(x / 10.0f)), Color(90, 60, 30));
-          for (int x = fx0 + 3; x < W; x += 7)
-            leaf(x - 2, 1 + (int) (1.5f + 1.5f * sinf(x / 10.0f)), leafc[(int) (hf(x, 13) * 4) & 3], hf(x, 14) < 0.5f);
+      if (frame_top) {                                // December: Christmas lights
+        // Christmas lights on a sagging wire, chasing.
+        const Color bulbs[4] = {Color(230, 30, 40), Color(40, 230, 80), gold, Color(60, 120, 255)};
+        const int chase = millis() / 250;
+        for (int i = 0, x = fx0; x < W; i++, x += 8) {
+          for (int dx = 0; dx < 8; dx++) it.draw_pixel_at(x + dx, (dx >= 2 && dx <= 5) ? 1 : 0, Color(40, 60, 40));
+          it.filled_rectangle(x + 3, 2, 2, 3, (i + chase) % 3 ? bulbs[i % 4] : dimc(bulbs[i % 4], 0.3f));
         }
       }
       if (frame_bot) {
