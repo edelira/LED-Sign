@@ -18,6 +18,8 @@
 #   sensor.led_sign_bears_game   the ESPN summary, held back on the sign by
 #                                input_number.led_sign_bears_delay (spoilers)
 #   sensor.led_sign_alerts       see below
+#   sensor.led_sign_theme        KEY|LABEL|DAYS (month theme + holiday countdown) or none
+#   sensor.led_sign_sky          WIND_MPH|WIND_FROM_DEG|CLOUD_PCT|SUN|MOON (weather background)
 # One action is left for one-off messages: esphome.led_sign_show_message
 # (line1, line2, seconds).
 #
@@ -312,6 +314,32 @@ globals:
   - id: g_b6_until
     type: int64_t
     initial_value: '0'
+  # Month theme (sensor.led_sign_theme): "nov", "dec", ... or empty = none
+  - id: th_key
+    type: std::string
+  - id: th_label
+    type: std::string
+  - id: th_days        # days to the holiday, -1 = no countdown
+    type: int
+    initial_value: '-1'
+  # Weather background (sensor.led_sign_sky)
+  - id: sky_wind       # mph
+    type: float
+    initial_value: '0'
+  - id: sky_from       # wind direction (where it blows from), degrees; -1 = unknown
+    type: float
+    initial_value: '-1'
+  - id: sky_cloud      # cloud cover %, -1 = unknown
+    type: float
+    initial_value: '-1'
+  - id: sky_sun        # 0 sunrise .. 1 sunset, -1 night
+    type: float
+    initial_value: '-1'
+  - id: sky_moon       # Moon integration phase, e.g. "waxing_crescent" (empty = unknown)
+    type: std::string
+  - id: fx_fast        # background animating: redraw at 25 fps
+    type: bool
+    initial_value: 'false'
 
 switch:
   - platform: template
@@ -338,6 +366,18 @@ switch:
     name: "Show trains"
     id: show_trains
     icon: mdi:train
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  - platform: template
+    name: "Show themes"
+    id: show_themes
+    icon: mdi:palette
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  - platform: template
+    name: "Weather background"
+    id: wx_background
+    icon: mdi:weather-partly-snowy-rainy
     optimistic: true
     restore_mode: RESTORE_DEFAULT_ON
 
@@ -454,6 +494,44 @@ text_sensor:
           };
           for (const auto &w : table)
             if (x == w.ha) { id(tm_label) = w.label; id(tm_code) = w.code; break; }
+  # Month theme: KEY|LABEL|DAYS or none (packages/led_sign_themes.yaml).
+  - platform: homeassistant
+    id: ha_theme
+    entity_id: sensor.led_sign_theme
+    internal: true
+    on_value:
+      - lambda: |-
+          if (x == "unknown" || x == "unavailable" || x.empty()) return;
+          std::vector<std::string> p;
+          for (size_t a = 0;;) {
+            const size_t b = x.find('|', a);
+            p.push_back(x.substr(a, b == std::string::npos ? b : b - a));
+            if (b == std::string::npos) break;
+            a = b + 1;
+          }
+          id(th_key) = p[0] == "none" ? "" : p[0];
+          id(th_label) = p.size() > 1 ? p[1] : "";
+          id(th_days) = p.size() > 2 && !p[2].empty() ? atoi(p[2].c_str()) : -1;
+  # Weather background: WIND_MPH|WIND_FROM_DEG|CLOUD_PCT|SUN|MOON
+  - platform: homeassistant
+    id: ha_sky
+    entity_id: sensor.led_sign_sky
+    internal: true
+    on_value:
+      - lambda: |-
+          std::vector<std::string> p;
+          for (size_t a = 0;;) {
+            const size_t b = x.find('|', a);
+            p.push_back(x.substr(a, b == std::string::npos ? b : b - a));
+            if (b == std::string::npos) break;
+            a = b + 1;
+          }
+          if (p.size() < 4) return;      // unknown / unavailable: keep the last
+          id(sky_wind) = atof(p[0].c_str());
+          id(sky_from) = atof(p[1].c_str());
+          id(sky_cloud) = atof(p[2].c_str());
+          id(sky_sun) = atof(p[3].c_str());
+          id(sky_moon) = p.size() > 4 ? p[4] : "";
   # What needs attention right now, worked out in HA:
   # "TITLE|DETAIL|ICON;..." or "none". See the note at the top.
   - platform: homeassistant
@@ -725,6 +803,12 @@ binary_sensor:
     id: ha_trash
     entity_id: input_boolean.trash_reminder
     internal: true
+  # Someone in the kitchen or living room (the sign dims when not): the
+  # moving weather background only runs while it's on.
+  - platform: homeassistant
+    id: ha_room
+    entity_id: binary_sensor.kitchen_or_living_room_occupied
+    internal: true
 
 image:
   - platform: online_image
@@ -861,14 +945,14 @@ color:
     blue_int: 80
 
 # Redraw the screen every 80 ms (smooth scrolling), or every 40 ms (25 fps)
-# while the train animation is on. The panels themselves refresh at
+# while the train animation or the weather background is on. The panels themselves refresh at
 # min_refresh_rate.
 interval:
   - interval: 40ms
     then:
       - lambda: |-
           static uint8_t tick = 0;
-          bool animating = id(show_trains).state && id(tr_until) > id(sntp_time).now().timestamp;
+          bool animating = (id(show_trains).state && id(tr_until) > id(sntp_time).now().timestamp) || id(fx_fast);
           if (animating || ++tick % 2 == 0) id(sign).update();
   - interval: 1s
     then:
@@ -1197,13 +1281,18 @@ display:
       };
       // Neon-outline front-loader in the alert's colour, 26x29 px at k = 1
       // (k = 2 on the full-screen flash). Animated from millis().
-      auto machine = [&](int x, int y, int k, const std::string &kind) {
+      // hollow: outline only, so a theme / weather background shows through.
+      auto machine = [&](int x, int y, int k, const std::string &kind, bool hollow = false) {
         const float t = millis() / 1000.0f, tau = 6.2831853f;
         const Color acc = alert_color(kind), soft(240, 240, 255), black(0, 0, 0);
         auto R = [&](int a, int b, int w, int h, Color c) { it.filled_rectangle(x + a * k, y + b * k, w * k, h * k, c); };
         auto C = [&](int a, int b, int r, Color c) { it.filled_circle(x + a * k, y + b * k, r * k, c); };
-        R(0, 0, 26, 28, acc);                    // outline ...
-        R(1, 1, 24, 26, dimc(acc, 0.10f));       // ... around a dark body
+        if (hollow) {
+          R(0, 0, 26, 1, acc); R(0, 27, 26, 1, acc); R(0, 0, 1, 28, acc); R(25, 0, 1, 28, acc);
+        } else {
+          R(0, 0, 26, 28, acc);                  // outline ...
+          R(1, 1, 24, 26, dimc(acc, 0.10f));     // ... around a dark body
+        }
         R(1, 5, 24, 1, acc);                     // control panel line
         R(3, 2, 2, 2, soft); R(7, 2, 2, 2, dimc(acc, 0.6f)); R(17, 2, 6, 2, dimc(acc, 0.6f));
         R(3, 28, 3, 1, dimc(acc, 0.5f)); R(20, 28, 3, 1, dimc(acc, 0.5f));
@@ -1683,6 +1772,287 @@ display:
       const int ox = (music && wide) ? 64 : 0;   // music keeps the album art panel whole
       const int top = tbar ? 16 : 0, bot = strip ? 51 : 64;
 
+      // ---- Month theme and live-weather background (sensor.led_sign_theme,
+      // sensor.led_sign_sky). Layers, bottom to top: the real weather, dim,
+      // across the whole sign; the month's frame along the top and bottom
+      // edges; then the clock and the right-hand cards, their text outlined
+      // in black so it reads over the background. Off on the full-screen
+      // moments above; on the music screen only the frame, on the song side. ----
+      const std::string &thk = id(th_key);
+      const bool th_nov = thk == "nov", th_dec = thk == "dec";
+      const bool theme = wide && id(show_themes).state && (th_nov || th_dec);
+      const bool wx_fresh = have_wx && !(id(wx_ts) > 0 && ts - id(wx_ts) > 3 * 3600);
+      const bool room = id(ha_room).state;            // the sign dims when nobody's around
+      const bool bg_on = wide && !music && id(wx_background).state && wx_fresh && room;
+      const bool layered = !music && (theme || bg_on);
+      const bool leaves = theme && th_nov && !music && room;
+      // The frame steps aside for the timer bar (top) and the Bears strip
+      // (bottom); with music, no leaf garland over the song title.
+      const bool frame_top = theme && !tbar && (!music || th_dec);
+      const bool frame_bot = theme && !strip;
+      const int fx0 = music ? 64 : 0;
+      // Rows the right-hand cards may use, between the bars / the frame.
+      const int s_top = tbar ? 17 : (frame_top ? (th_dec ? 7 : 9) : 1);
+      const int s_bot = strip ? 49 : (frame_bot ? 57 : 62);
+      const int sky_y0 = tbar ? 16 : 0, sky_y1 = strip ? 50 : 63;
+      id(fx_fast) = bg_on || leaves;
+      const Color black(0, 0, 0), gold(255, 200, 40), brown(120, 70, 30);
+      const Color leafc[4] = {Color(255, 110, 20), Color(220, 50, 20), Color(255, 170, 30), Color(170, 80, 20)};
+      // Repeatable pseudo-random 0..1 for particle i (placement, phase).
+      auto hf = [](int i, int k) {
+        uint32_t h = (uint32_t) i * 2654435761u + (uint32_t) k * 40503u + 0x9e37u;
+        h ^= h >> 15; h *= 2246822519u; h ^= h >> 13;
+        return (h & 0xFFFF) / 65535.0f;
+      };
+      // Motion follows the real wind: which way it blows across the sign
+      // (facing ${radar_heading} degrees) and how hard. Offsets accumulate, so a
+      // new wind reading changes the speed without making anything jump.
+      static uint32_t fx_last = 0;
+      static float cl_off = 0, lf_off = 0, sn_off = 0;
+      float wind_x;                                   // mph across the sign, + = to the right
+      {
+        const uint32_t ms = millis();
+        float dt = fx_last ? (ms - fx_last) / 1000.0f : 0;
+        if (dt > 0.5f) dt = 0.5f;
+        fx_last = ms;
+        const float mph = id(sky_wind);
+        float dirx = 0.6f;
+        if (id(sky_from) >= 0) dirx = sinf((id(sky_from) + 180.0f - ${radar_heading}) * M_PI / 180.0f);
+        wind_x = mph * dirx;
+        const float v = (0.8f + mph * 0.22f) * (dirx >= 0 ? 1.0f : -1.0f) * std::max(0.3f, fabsf(dirx));
+        cl_off = fmodf(cl_off + v * dt, 240.0f);
+        lf_off = fmodf(lf_off + v * 2.2f * (1 + 0.35f * sinf(tsec * 1.05f)) * dt, 200.0f);
+        sn_off = fmodf(sn_off + v * 0.6f * dt, (float) W);
+      }
+      auto leaf = [&](int x, int y, Color c, bool flip) {
+        static const int8_t pts[12][2] = {{2, 0}, {1, 1}, {2, 1}, {3, 1}, {0, 2}, {1, 2}, {2, 2}, {3, 2}, {4, 2}, {1, 3}, {2, 3}, {3, 3}};
+        for (auto &q : pts) it.draw_pixel_at(x + (flip ? 4 - q[0] : q[0]), y + q[1], c);
+        it.draw_pixel_at(x + 2, y + 4, brown);
+      };
+
+      if (bg_on) {
+        it.start_clipping(0, sky_y0, W, sky_y1 + 1);
+        const int lvl = std::max(0, std::min(id(wx_lvl), 2));
+        const bool night = id(sky_sun) < 0;
+        const bool storm = code == 95 || code == 96;
+        const bool snowy = (code >= 71 && code <= 77) || code == 67 || code == 85 || code == 86;
+        const bool wet = (code >= 51 && code <= 67) || (code >= 80 && code <= 82) || storm;
+        const bool clearish = code == 0 || code == 100 || code == 2 || code == 4;
+        // Lightning: a flash and a bolt every ~9 s in a thunderstorm.
+        if (code == 95) {
+          const int cyc = (int) (tsec / 9.0f);
+          const float ph = tsec - cyc * 9.0f;
+          if (ph < 0.18f || (ph > 0.35f && ph < 0.45f)) {
+            it.filled_rectangle(0, sky_y0, W, sky_y1 - sky_y0 + 1, Color(25, 25, 40));
+            int bx = 20 + (int) (hf(cyc, 7) * 150), by = sky_y0;
+            for (int k = 0; k < 5; k++) {
+              const int nx = bx + (int) (hf(cyc * 7 + k, 8) * 10) - 5, ny = by + 8;
+              it.line(bx, by, nx, ny, Color(255, 255, 200));
+              bx = nx; by = ny;
+            }
+          }
+        }
+        // Night: twinkling stars and the moon in its real phase.
+        if (night && clearish) {
+          for (int i = 0; i < 40; i++)
+            it.draw_pixel_at((int) (hf(i, 1) * W), (int) (hf(i, 2) * 48),
+                             dimc(Color(200, 200, 230), 0.25f + 0.35f * (0.5f + 0.5f * sinf(tsec * 1.3f + i * 2.1f))));
+          const std::string &mp = id(sky_moon);
+          if (mp != "new_moon") {
+            const int mx = 100, my = 9;
+            it.filled_circle(mx, my, 5, Color(150, 150, 120));
+            const int sd = (mp.rfind("waxing", 0) == 0 || mp == "first_quarter") ? -1 : 1;  // shadow side
+            if (mp.empty() || mp.find("crescent") != std::string::npos) it.filled_circle(mx + sd * 3, my - 1, 5, black);
+            else if (mp.find("quarter") != std::string::npos) it.filled_rectangle(sd < 0 ? mx - 5 : mx + 1, my - 5, 5, 11, black);
+            else if (mp.find("gibbous") != std::string::npos) it.filled_circle(mx + sd * 8, my, 5, black);
+          }
+        }
+        // Day: the sun on its real path, rising on the left, setting on the right.
+        if (!night && clearish) {
+          const float f = id(sky_sun);
+          const int sx = 8 + (int) (176 * f), sy = 46 - (int) (38 * sinf(M_PI * f));
+          const Color sc = (f > 0.15f && f < 0.85f) ? Color(140, 105, 20) : Color(140, 60, 15);
+          for (int k = 0; k < 8; k++) {
+            const float a = k * M_PI / 4 + tsec * 0.3f;
+            it.line(sx + (int) (6 * cosf(a)), sy + (int) (6 * sinf(a)), sx + (int) (8 * cosf(a)), sy + (int) (8 * sinf(a)), dimc(sc, 0.7f));
+          }
+          it.filled_circle(sx, sy, 4, sc);
+        }
+        // Clouds: as many as the cloud cover says, drifting with the wind.
+        int nc = id(sky_cloud) >= 0 ? (int) lroundf(id(sky_cloud) / 25.0f)
+                                    : ((code == 0 || code == 100) ? 0 : ((code == 2 || code == 4) ? 2 : 4));
+        if (wet || snowy || code == 3 || code == 45) nc = std::max(nc, 3);
+        nc = std::min(nc, 5);
+        const Color ccol = (wet || snowy) ? Color(45, 45, 58) : Color(70, 70, 85);
+        for (int i = 0; i < nc; i++) {
+          float x = fmodf(i * 240.0f / nc + cl_off, 240.0f);
+          if (x < 0) x += 240.0f;
+          cloud_at((int) x - 24, -4 + (i * 7) % 12, ccol);
+        }
+        // Fog: slow bands of mist.
+        if (code == 45) {
+          static const int fy[4] = {10, 24, 40, 55};
+          for (int b = 0; b < 4; b++)
+            for (int x = 0; x < W; x++) {
+              const float k = 0.5f + 0.5f * sinf(x / 14.0f + tsec * 0.4f + b * 1.7f);
+              if (k > 0.55f) {
+                it.draw_pixel_at(x, fy[b], dimc(Color(90, 90, 100), (k - 0.55f) * 1.4f));
+                it.draw_pixel_at(x, fy[b] + 1, dimc(Color(90, 90, 100), (k - 0.55f) * 0.8f));
+              }
+            }
+        }
+        // Rain (and hail), heavier with the intensity, slanted by the wind.
+        if (wet) {
+          const int rn[3] = {30, 50, 80};
+          const float slant = std::max(-3.0f, std::min(3.0f, wind_x / 12.0f));
+          const Color rc = dimc(Color(60, 130, 255), 0.55f);
+          const int span = sky_y1 - sky_y0 + 6;
+          for (int i = 0; i < rn[lvl]; i++) {
+            const float p = frac(tsec * 0.65f + hf(i, 4));
+            const int y = sky_y0 - 3 + (int) (p * span);
+            int x = ((int) (hf(i, 3) * W + slant * y) % W + W) % W;
+            it.line(x, y, x - (int) slant, y + 3, rc);
+            if (code == 96 && i % 4 == 0) it.filled_rectangle(x + 2, y, 2, 2, Color(200, 200, 210));
+          }
+        }
+        // Snow, drifting with the wind.
+        if (snowy) {
+          const int fn[3] = {40, 60, 90};
+          const int span = sky_y1 - sky_y0 + 2;
+          for (int i = 0; i < fn[lvl]; i++) {
+            const int s2 = 1 + i % 2;
+            const float p = frac(tsec * 0.1f * s2 + hf(i, 5));
+            const int y = sky_y0 + (int) (p * span);
+            float xf = fmodf(hf(i, 6) * W + sn_off * s2 + 1.5f * sinf(tsec * 1.6f + i), (float) W);
+            if (xf < 0) xf += W;
+            it.draw_pixel_at((int) xf, y, s2 == 1 ? Color(110, 112, 125) : Color(170, 175, 190));
+          }
+        }
+        // Wind: a few gusts streaking across.
+        if (code == 4) {
+          for (int i = 0; i < 8; i++) {
+            float x = fmodf(hf(i, 10) * (W + 20) + cl_off * 3 * (1 + i % 2), (float) (W + 20));
+            if (x < 0) x += W + 20;
+            it.horizontal_line((int) x - 10, 6 + (int) (hf(i, 9) * 44), 6 + (int) (hf(i, 11) * 8), Color(60, 60, 70));
+          }
+        }
+        it.end_clipping();
+      }
+      // November: leaves falling and blowing with the real wind.
+      if (leaves) {
+        it.start_clipping(0, sky_y0, W, sky_y1 + 1);
+        const float mph = id(sky_wind), fall = 3 + 6 / (1 + mph / 8);
+        for (int i = 0; i < 20; i++) {
+          const int s2 = 1 + i % 2;
+          float x = fmodf(hf(i, 11) * 200 + lf_off * s2, 200.0f);
+          if (x < 0) x += 200;
+          float y = fmodf(hf(i, 12) * 64 + fall * tsec + (2 + mph / 6) * sinf(tsec * 2.1f + i * 0.9f), 64.0f);
+          if (y < 0) y += 64;
+          leaf((int) x - 6, (int) y, dimc(leafc[i % 4], 0.6f), ((int) (tsec * (1 + mph / 10)) + i) % 2 == 0);
+        }
+        it.end_clipping();
+      }
+      // The frame along the top and bottom edges.
+      if (frame_top) {
+        if (th_dec) {
+          // Christmas lights on a sagging wire, chasing.
+          const Color bulbs[4] = {Color(230, 30, 40), Color(40, 230, 80), gold, Color(60, 120, 255)};
+          const int chase = millis() / 250;
+          for (int i = 0, x = fx0; x < W; i++, x += 8) {
+            for (int dx = 0; dx < 8; dx++) it.draw_pixel_at(x + dx, (dx >= 2 && dx <= 5) ? 1 : 0, Color(40, 60, 40));
+            it.filled_rectangle(x + 3, 2, 2, 3, (i + chase) % 3 ? bulbs[i % 4] : dimc(bulbs[i % 4], 0.3f));
+          }
+        } else {
+          // Leaf garland.
+          for (int x = fx0; x < W; x += 2) it.draw_pixel_at(x, 1 + (int) (1.5f + 1.5f * sinf(x / 10.0f)), Color(90, 60, 30));
+          for (int x = fx0 + 3; x < W; x += 7)
+            leaf(x - 2, 1 + (int) (1.5f + 1.5f * sinf(x / 10.0f)), leafc[(int) (hf(x, 13) * 4) & 3], hf(x, 14) < 0.5f);
+        }
+      }
+      if (frame_bot) {
+        if (th_dec) {
+          // Snow drift.
+          for (int x = fx0; x < W; x++) {
+            const int h = 2 + (int) (1.5f + 1.5f * sinf(x / 9.0f) + sinf(x / 4.3f));
+            if (h > 0) it.vertical_line(x, 64 - h, h, Color(147, 150, 161));
+          }
+        } else {
+          // Pile of leaves.
+          for (int x = fx0; x < W; x += 3) {
+            const int h = 2 + (int) (1 + sinf(x / 7.0f) + sinf(x / 3.1f));
+            for (int k = 0; k < h; k++) it.horizontal_line(x, 63 - k, 3, dimc(leafc[(int) (hf(x, k + 15) * 4) & 3], 0.55f));
+          }
+        }
+      }
+      // Text with a 1 px black outline while something is drawn behind it.
+      static const int8_t od[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+      auto oprint = [&](int x, int y, display::BaseFont *f, Color c, TextAlign a, const char *s) {
+        if (layered) for (auto &d : od) it.print(x + d[0], y + d[1], f, black, a, s);
+        it.print(x, y, f, c, a, s);
+      };
+      auto otxt = [&](int x, int y, display::BaseFont *f, Color c, TextAlign a, const std::string &s) {
+        oprint(x, y - cap(f), f, c, a, s.c_str());
+      };
+      // November card: a turkey fanning its tail and bobbing its head; cy = body row.
+      auto turkey = [&](int tx, int cy) {
+        const float fan = 0.85f + 0.15f * (0.5f + 0.5f * sinf(tsec * 1.26f));
+        const Color fc[3] = {Color(230, 30, 40), Color(255, 110, 20), gold};
+        const int rr[3] = {14, 11, 8};
+        for (int i = 0; i < 3; i++) {
+          const int r = (int) lroundf(rr[i] * fan);
+          for (int dy = -r; dy <= 0; dy++) {
+            const int w = (int) (sqrtf((float) (r * r - dy * dy)) + 0.5f);
+            it.horizontal_line(tx - w, cy + dy, 2 * w + 1, fc[i]);
+          }
+        }
+        it.filled_circle(tx, cy + 3, 7, brown);
+        const int hy = cy - 5 + ((millis() / 250) % 4 == 0 ? 1 : 0);
+        it.filled_circle(tx, hy, 4, Color(150, 90, 40));
+        it.draw_pixel_at(tx - 1, hy - 1, black);
+        it.draw_pixel_at(tx + 1, hy - 1, black);
+        it.filled_rectangle(tx - 1, hy + 1, 2, 2, gold);              // beak
+        it.filled_rectangle(tx + 1, hy + 2, 1, 3, Color(230, 30, 40)); // wattle
+        for (int lx : {tx - 3, tx + 3}) {
+          it.vertical_line(lx, cy + 10, 4, gold);
+          it.horizontal_line(lx - 1, cy + 14, 3, gold);
+        }
+      };
+      // December card: a tree with a twinkling star and ornaments, 33 rows
+      // from the star; returns the row below the trunk.
+      auto tree = [&](int tx, int top_y) {
+        const Color star = dimc(gold, 0.6f + 0.4f * fabsf(sinf(tsec * 1.26f)));
+        const Color g1(30, 160, 60), g2(15, 100, 35);
+        it.draw_pixel_at(tx, top_y, star);
+        it.horizontal_line(tx - 1, top_y + 1, 3, star);
+        it.draw_pixel_at(tx, top_y + 2, star);
+        static const int tiers[3][2] = {{3, 7}, {8, 11}, {13, 15}};
+        int y = top_y + 3;
+        for (int i = 0; i < 3; i++) {
+          const int hh = tiers[i][0], half = tiers[i][1];
+          for (int r = 0; r < hh + 2; r++) {
+            const int w = std::max(1, half * (r + 1) / (hh + 2) + i);
+            it.horizontal_line(tx - w, y + r, 2 * w + 1, r % 3 ? g1 : g2);
+          }
+          y += hh;
+        }
+        it.filled_rectangle(tx - 2, y + 2, 5, 4, brown);
+        const Color orn[4] = {Color(230, 30, 40), Color(40, 230, 80), gold, Color(60, 120, 255)};
+        for (int i = 0; i < 16; i++) {
+          const int yy = top_y + 5 + (int) (hf(i, 20) * (y - top_y - 5));
+          const int span = std::max(1, (int) ((yy - top_y) * 0.55f));
+          const int xx = tx - span + (int) (hf(i, 21) * (2 * span + 1));
+          it.draw_pixel_at(xx, yy, dimc(orn[i % 4], 0.35f + 0.65f * (0.5f + 0.5f * sinf(tsec * 0.84f + i * 1.7f))));
+        }
+        return y + 6;
+      };
+      auto present = [&](int x, int y, Color c, Color rib) {
+        it.filled_rectangle(x, y, 8, 6, c);
+        it.vertical_line(x + 3, y, 6, rib);
+        it.horizontal_line(x, y + 2, 8, rib);
+        it.draw_pixel_at(x + 2, y - 1, rib);
+        it.draw_pixel_at(x + 5, y - 1, rib);
+      };
+
       if (tbar) {
         const int64_t rem = id(timer_end) - ts;
         const int bw = W - ox;
@@ -1796,7 +2166,21 @@ display:
 
       // Clock on the first two panels.
       const int clock_w = wide ? 128 : W;
-      if (!tbar && !strip) {
+      if (layered) {
+        // Same layout, outlined, in the month's colour.
+        const Color clk = theme ? (th_nov ? Color(255, 110, 20) : id(c_white)) : id(c_amber);
+        const std::string date = now.strftime("%a %b %d");
+        if (!tbar && !strip) {
+          oprint(clock_w / 2 - 6, 26, id(f32), clk, TextAlign::CENTER, hm);
+          oprint(clock_w - 2, 8, id(f8), id(c_dim), TextAlign::TOP_RIGHT, ampm);
+          oprint(clock_w / 2, 54, id(f8), id(c_dim), TextAlign::CENTER, date.c_str());
+        } else {
+          const int ctop = top + (tbar ? 4 : 8);
+          otxt(clock_w / 2 - 6, ctop, id(f32), clk, TextAlign::TOP_CENTER, hm);
+          otxt(clock_w - 2, top + 3, id(f8), id(c_dim), TextAlign::TOP_RIGHT, ampm);
+          if (bot - top >= 48) otxt(clock_w / 2, ctop + 30, id(f8), id(c_dim), TextAlign::TOP_CENTER, date);
+        }
+      } else if (!tbar && !strip) {
         it.printf(clock_w / 2 - 6, 26, id(f32), id(c_amber), TextAlign::CENTER, "%s", hm);
         it.print(clock_w - 2, 8, id(f8), id(c_dim), TextAlign::TOP_RIGHT, ampm);
         it.strftime(clock_w / 2, 54, id(f8), id(c_dim), TextAlign::CENTER, "%a %b %d", now);
@@ -1814,15 +2198,131 @@ display:
       // trash the night before pickup until the bins are out; one card per
       // alert from HA (C_ALERT + i).
       const int cx = 160;
-      enum { C_WX, C_TMRW, C_BEARS, C_TRASH, C_ALERT };
-      int cards[8], n = 0;
+      enum { C_WX, C_TMRW, C_BEARS, C_TRASH, C_THEME, C_ALERT };
+      int cards[10], n = 0;
       cards[n++] = C_WX;
       if (now.hour >= 19 && id(tm_code) >= 0 && !std::isnan(id(ha_tm_hi).state)) cards[n++] = C_TMRW;
       if (gs == "pre") cards[n++] = C_BEARS;
       if (id(ha_trash).state) cards[n++] = C_TRASH;
+      if (theme && id(al_list).empty()) cards[n++] = C_THEME;   // alerts get the turns instead
       for (int i = 0; i < (int) id(al_list).size() && i < 4; i++) cards[n++] = C_ALERT + i;
       const int card = cards[(millis() / 8000) % n];
       const bool full = !tbar && !strip;
+
+      if (layered) {
+        // Cards over the theme / weather background: everything stacked and
+        // centred between s_top and s_bot (clear of the frame and the bars).
+        // If a card doesn't fit (a bar is up), its picture is dropped first,
+        // then its last line.
+        struct Item { int h; std::function<void(int)> draw; };
+        auto stack = [&](std::vector<Item> v, int gap, bool art) {
+          for (;;) {
+            int total = -gap;
+            for (auto &i : v) total += i.h + gap;
+            if (total <= s_bot - s_top + 1 || v.size() <= 1) {
+              int y = s_top + std::max(0, (s_bot - s_top + 1 - total) / 2);
+              for (auto &i : v) { i.draw(y); y += i.h + gap; }
+              return;
+            }
+            if (art) { v.erase(v.begin()); art = false; } else v.pop_back();
+          }
+        };
+        // One line of text: cap height 5 (f8) or 10 (f16); scrolls if too wide.
+        auto T = [&](display::BaseFont *f, Color c, const std::string &str) -> Item {
+          return {f == id(f8) ? 5 : 10, [&, f, c, str](int y) {
+            if (text_w(f, str) > 62) mq(130, W - 2, y, f, c, str);
+            else otxt(cx, y, f, c, TextAlign::TOP_CENTER, str);
+          }};
+        };
+        if (card == C_THEME) {
+          const int dd = id(th_days);
+          std::vector<Item> v;
+          if (th_nov) {
+            v.push_back({30, [&](int y) { turkey(cx, y + 15); }});
+            if (dd >= 0) {
+              v.push_back(T(id(f8), Color(255, 110, 20), id(th_label).empty() ? "TURKEY" : id(th_label)));
+              v.push_back(T(id(f8), id(c_white), dd == 0 ? "TODAY" : (dd == 1 ? "TOMORROW" : "IN " + std::to_string(dd) + " DAYS")));
+            }
+          } else {
+            v.push_back({33, [&](int y) {
+              const int b = tree(cx, y);
+              present(cx - 22, b - 7, Color(230, 30, 40), gold);
+              present(cx + 14, b - 7, Color(60, 120, 255), id(c_white));
+            }});
+            if (dd >= 0) v.push_back(T(id(f8), id(c_white), dd == 0 ? "TODAY" : std::to_string(dd) + (dd == 1 ? " DAY" : " DAYS")));
+          }
+          stack(v, 3, true);
+          return;
+        }
+        if (card >= C_ALERT) {
+          const auto &al = id(al_list)[card - C_ALERT];
+          const Color acc = alert_color(al[2]);
+          std::vector<Item> v;
+          if (has_icon(al[2])) {
+            v.push_back({29, [&](int y) { machine(cx - 13, y, 1, al[2], true); }});
+          } else {
+            v.push_back({25, [&](int y) {
+              it.filled_circle(cx, y + 12, 12, id(c_amber));
+              it.filled_rectangle(cx - 1, y + 4, 3, 10, black);
+              it.filled_rectangle(cx - 1, y + 17, 3, 3, black);
+            }});
+          }
+          v.push_back(T(id(f8), acc, al[0]));
+          v.push_back(T(id(f8), id(c_white), al[1]));
+          stack(v, 4, true);
+          return;
+        }
+        if (card == C_TRASH) {
+          stack({{28, [&](int y) {
+                    const Color can(60, 160, 90), rib(30, 90, 50);
+                    it.filled_rectangle(cx - 3, y, 7, 2, can);
+                    it.filled_rectangle(cx - 11, y + 2, 23, 3, can);
+                    it.filled_rectangle(cx - 9, y + 6, 19, 22, can);
+                    for (int x = cx - 5; x <= cx + 5; x += 5) it.filled_rectangle(x, y + 9, 1, 16, rib);
+                  }},
+                 T(id(f8), id(c_white), "TRASH"), T(id(f8), id(c_amber), "TOMORROW")}, 4, true);
+          return;
+        }
+        if (card == C_TMRW) {
+          // A faint panel and its own icon, so it doesn't read as the weather now.
+          if (bg_on) it.filled_rectangle(129, s_top, W - 129, s_bot - s_top + 1, Color(6, 6, 8));
+          char hl[16];
+          snprintf(hl, sizeof hl, "%.0f/%.0f", id(ha_tm_hi).state, id(ha_tm_lo).state);
+          std::vector<Item> v;
+          v.push_back(T(id(f8), id(c_dim), "TOMORROW"));
+          v.push_back({20, [&](int y) { wx_icon(cx, y, id(tm_code), 1, 20); }});
+          v.push_back(T(id(f8), id(c_white), id(tm_label)));
+          v.push_back(T(id(f8), id(c_amber), hl));
+          if (s_bot - s_top + 1 < 44) v.erase(v.begin() + 1);
+          stack(v, 3, false);
+          return;
+        }
+        if (card == C_BEARS) {
+          it.filled_rectangle(129, s_top, W - 129, s_bot - s_top + 1, hexc(id(g_us_c), 60));
+          stack({T(id(f8), hexc(id(g_us_a), 255), id(g_home) ? "BEARS VS" : "BEARS AT"),
+                 T(id(f16), id(c_white), id(g_opp)), T(id(f8), id(c_amber), id(g_kick)),
+                 T(id(f8), id(c_dim), id(g_channel))}, 4, false);
+          return;
+        }
+        if (!have_wx) {
+          oprint(cx, (s_top + s_bot) / 2, id(f8), id(c_dim), TextAlign::CENTER, "NO WX");
+          return;
+        }
+        if (id(wx_ts) > 0 && ts - id(wx_ts) > 3 * 3600) it.filled_rectangle(W - 3, s_top, 2, 2, id(c_gray));
+        // Weather now: with the background on, the sky already shows the
+        // conditions, so no big icon; without it, a small one.
+        std::vector<Item> v;
+        if (!bg_on) v.push_back({20, [&](int y) { wx_icon(cx, y, code, id(wx_lvl), 20); }});
+        v.push_back(T(id(f16), id(c_white), temp));
+        v.push_back(T(id(f8), id(c_white), id(wx_label)));
+        if (!std::isnan(id(wx_hi))) {
+          char hl[16];
+          snprintf(hl, sizeof hl, "%.0f/%.0f", id(wx_hi), id(wx_lo));
+          v.push_back(T(id(f8), id(c_dim), hl));
+        }
+        stack(v, bg_on ? 4 : 3, !bg_on);
+        return;
+      }
 
       if (card >= C_ALERT) {
         const auto &al = id(al_list)[card - C_ALERT];
