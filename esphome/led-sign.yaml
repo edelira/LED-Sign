@@ -10,7 +10,7 @@
 # Nothing is pushed: the sign reads its screens from HA sensors, so a
 # rebooted sign catches up by itself and HA needs no "send to sign"
 # automations. Each sensor is "none" when there is nothing to show.
-#   sensor.led_sign_train        COMPANY|NAME|NUMBER|W/E|DEST|LATE|UNTIL_TS
+#   sensor.led_sign_train        COMPANY|NAME|NUMBER|W/E|DEST|LATE|UNTIL_TS|PASS_TS|MPH
 #   sensor.led_sign_plane        FLIGHT|TYPE|ROUTE|AIRLINE|ALT|RATE|SPEED|TRACK|DX|DY|RADIUS
 #   sensor.led_sign_timer        LABEL|END_TS|DURATION
 #   sensor.led_sign_leave        TITLE|AT|LEAVE_TS|START_TS|DRIVE|TRAFFIC
@@ -243,6 +243,12 @@ globals:
   - id: tr_start       # millis() when the current train arrived (animation clock)
     type: uint32_t
     initial_value: '0'
+  - id: tr_pass_ms     # millis() when the front passes the house (0: old format, no timing)
+    type: int64_t
+    initial_value: '0'
+  - id: tr_mph         # speed past the house
+    type: float
+    initial_value: '40'
   # Now playing (read from HA)
   - id: np_active
     type: bool
@@ -497,7 +503,8 @@ text_sensor:
           id(al_list) = list;
   # ---- Screens read from HA. "none" = nothing to show; unavailable /
   # unknown (HA restarting) are ignored so what's on screen stays. ----
-  # Train passing: COMPANY|NAME|NUMBER|W/E|DEST|LATE|UNTIL_TS
+  # Train passing: COMPANY|NAME|NUMBER|W/E|DEST|LATE|UNTIL_TS|PASS_TS|MPH
+  # (PASS_TS / MPH are optional: without them the old 125 px/s entrance runs.)
   - platform: homeassistant
     id: ha_train
     entity_id: sensor.led_sign_train
@@ -511,19 +518,52 @@ text_sensor:
             if (b == std::string::npos) break;
             a = b + 1;
           }
-          if (p.size() < 7) return;      // the train on screen runs out by itself
           const int64_t now = id(sntp_time).now().timestamp;
+          // "none" for a timed train: HA dropped it (its GPS is past the
+          // house, or its window is over). If the animated train hasn't
+          // reached the sign yet, end the screen now; one already crossing
+          // finishes by itself.
+          if (x == "none" && id(tr_pass_ms) > 0) {
+            if ((int64_t) millis() < id(tr_pass_ms) - (int64_t) (96000.0f / (id(tr_mph) * 1.19f)))
+              id(tr_until) = std::min(id(tr_until), now);
+            return;
+          }
+          if (p.size() < 7) return;      // the train on screen runs out by itself
           const int number = atoi(p[2].c_str());
           // A new train (not a refresh of the one showing) restarts the
           // full-width entrance animation.
-          if (id(tr_until) <= now || number != id(tr_number)) id(tr_start) = millis();
+          const bool fresh = id(tr_until) <= now || number != id(tr_number);
+          if (fresh) id(tr_start) = millis();
+          if (p.size() >= 9 && atoll(p[7].c_str()) > 0) {
+            // Pass time on the millis() clock. Once the train is on screen
+            // it keeps its timing, so a refreshed prediction can't make it jump.
+            const int64_t pass_ms = (int64_t) millis() + (atoll(p[7].c_str()) - now) * 1000;
+            const float mph = std::max(10.0f, std::min(90.0f, (float) atof(p[8].c_str())));
+            // On screen = the front has reached the sign's edge (half a sign,
+            // 96 px, before the middle) at 1.19 px/s per mph.
+            const bool visible = !fresh && id(tr_pass_ms) > 0 &&
+                (int64_t) millis() >= id(tr_pass_ms) - (int64_t) (96000.0f / (id(tr_mph) * 1.19f));
+            if (!visible) { id(tr_pass_ms) = pass_ms; id(tr_mph) = mph; }
+          } else {
+            id(tr_pass_ms) = 0;
+          }
           id(tr_operator) = p[0];
           id(tr_name) = p[1];
           id(tr_number) = number;
           id(tr_west) = p[3] == "W";
           id(tr_dest) = p[4];
           id(tr_late) = atoi(p[5].c_str());
-          id(tr_until) = std::max((int64_t) atoll(p[6].c_str()), now + 15);
+          if (id(tr_pass_ms) > 0) {
+            // Timed: on screen until the animated train has crossed (the
+            // train screen ends it right then); this is only the backstop.
+            // Sizes as on the train screen: loco 57 px, cars 69 px + 2 px gap.
+            const int trainL = 57 + (p[0] == "METRA" ? 7 : 5) * 71;
+            const int64_t cross = (int64_t) ((96 + trainL) / (id(tr_mph) * 1.19f)) + 2;
+            id(tr_until) = now + (id(tr_pass_ms) - (int64_t) millis()) / 1000 + cross;
+          } else {
+            // Old format: at least 15 s on screen.
+            id(tr_until) = std::max((int64_t) atoll(p[6].c_str()), now + 15);
+          }
   # Plane overhead: FLIGHT|TYPE|ROUTE|AIRLINE|ALT|RATE|SPEED|TRACK|DX|DY|RADIUS
   # (dx/dy/radius in miles), refreshed every 10 s while a plane is in range.
   - platform: homeassistant
@@ -1286,6 +1326,14 @@ display:
       }
 
       // ---- Train passing ----
+      // A timed train whose animation has crossed the sign is done: back to
+      // the normal screens in this same frame. (Same sizes as the drawing below.)
+      if (id(tr_pass_ms) > 0 && id(tr_until) > ts) {
+        const int cars = id(tr_operator) == "METRA" ? 7 : 5;
+        const int trainL = 24 * 12 / 5 + cars * (24 * 29 / 10 + 2);
+        const float pxms = id(tr_mph) * 1.19f / 1000.0f;
+        if ((int64_t) millis() >= id(tr_pass_ms) + (int64_t) ((W / 2 + trainL) / pxms)) id(tr_until) = 0;
+      }
       if (id(show_trains).state && id(tr_until) > ts) {
         const bool wide = W >= 192;
         const int x0 = wide ? 70 : 2, xr = W - 2;
@@ -1302,7 +1350,7 @@ display:
         if (metra) { body = Color(165, 170, 180); st1 = Color(20, 70, 200); glass = Color(40, 55, 80);
                      locoBody = Color(20, 70, 200); locoSt1 = Color(165, 170, 180); }
         const Color dark(25, 30, 45), wheel(60, 60, 60);
-        const Color rail(90, 90, 90), tie(60, 40, 25), lamp(255, 220, 60);
+        const Color rail(90, 90, 90), tie(60, 40, 25), lamp(255, 220, 60), tail(230, 20, 20);
 
         // Drawing helpers, clipped by hand to [clip0, clip1).
         int clip0 = 0, clip1 = W;
@@ -1344,7 +1392,7 @@ display:
         };
         // faceLeft: which end the nose is on (a Metra loco pushing an
         // inbound train faces west, away from the direction of travel).
-        auto loco = [&](int x, int top, int L, int h, bool faceLeft) {
+        auto loco = [&](int x, int top, int L, int h, bool faceLeft, bool lead = true) {
           int nose = metra ? h / 3 : h / 2, s = std::max(1, h / 8);
           for (int i = 0; i < L; i++) {
             int d = faceLeft ? i : L - 1 - i;          // distance from the nose end
@@ -1355,36 +1403,68 @@ display:
           box(faceLeft ? x + nose - 1 : x + L - nose - cw + 1, top + h / 4 + 1, cw, std::max(2, h / 4), metra ? glass : dark);
           box(x, top + h * 3 / 5, L, s, locoSt1);
           box(x, top + h * 3 / 5 + s, L, 1, st2);
-          box(faceLeft ? x + 1 : x + L - 3, top + h - std::max(3, h / 4), 2, 2, lamp);
+          // Headlight when leading, red marker light when it's the back end.
+          box(faceLeft ? x + 1 : x + L - 3, top + h - std::max(3, h / 4), 2, 2, lead ? lamp : tail);
           wheels(x, top, L, h);
+        };
+        // Metra cab car: a gallery car with a driving cab on one end (flat
+        // front, windshield, headlights when leading, red markers when last).
+        auto cab = [&](int x, int top, int L, int h, bool cabLeft, bool lead) {
+          car(x, top, L, h);
+          int cw = std::max(3, h / 6), ex = cabLeft ? x : x + L - cw;
+          box(ex, top + 1, cw, h - 1, locoBody);                         // blue cab end
+          box(ex + (cabLeft ? 1 : 0), top + h / 5, cw - 1, std::max(2, h / 5), dark);   // windshield
+          int lx = cabLeft ? x : x + L - 2;
+          if (lead) {
+            box(lx, top + h - std::max(4, h / 4), 2, 2, lamp);
+            box(lx, top + 2, 2, 1, lamp);
+          } else {
+            box(lx, top + h - std::max(4, h / 4), 2, 2, tail);
+            box(lx, top + 2, 2, 1, tail);
+          }
         };
         auto track = [&](int y) {
           box(clip0, y, clip1 - clip0, 1, rail);
           for (int x = clip0; x < clip1; x += 5) box(x, y + 1, 1, 1, tie);
         };
 
-        // Entrance: a locomotive and three cars run across the whole sign.
-        const int h = 24, top = 30, cars = 3, gap = 2;
+        // Full-width train: a locomotive and its cars cross the whole sign.
+        // Metra: 7 cars (the cab car is the 7th); Amtrak and freight: 5.
+        // Timed trains (HA sent PASS_TS and MPH) move at the real speed, at
+        // the sign's scale (one 69 px car = an 85 ft car, so 1.19 px/s per
+        // mph), with the front at the middle of the sign as the real one
+        // passes the house; the screen ends as the last car leaves (above).
+        // Without timing: the old 125 px/s run right when the train arrives.
+        const int h = 24, top = 30, cars = metra ? 7 : 5, gap = 2;
         const int locoL = h * 12 / 5, carL = h * 29 / 10;
         const int trainL = locoL + cars * (carL + gap);
-        const int run = (int) (el * 0.125f);     // 125 px/s
-        if (wide && run < W + trainL) {
+        const bool timed = id(tr_pass_ms) > 0;
+        const float pxms = timed ? id(tr_mph) * 1.19f / 1000.0f : 0.125f;
+        // Front's distance past the entry edge, in px (negative = not here yet).
+        const int64_t now_ms = (int64_t) millis();
+        const int run = timed ? (int) (W / 2 + (now_ms - id(tr_pass_ms)) * pxms) : (int) (el * 0.125f);
+        if (wide && run >= 0 && run < W + trainL) {
           std::string title = id(tr_operator);
           if (id(tr_number) > 0) title += "  #" + std::to_string(id(tr_number));
           it.print(W / 2, 2, id(f16), id(c_amber), TextAlign::TOP_CENTER, title.c_str());
           track(top + h + 5);
-          // Leading end first: westbound enters from the right.
+          // Leading end first: westbound enters from the right. x is the left end.
           int x = left ? W - run : run - trainL;
-          if (left) {
-            loco(x, top, locoL, h, true);
-            for (int c = 0, cx = x + locoL + gap; c < cars; c++, cx += carL + gap) car(cx, top, carL, h);
-          } else if (metra) {
-            // Push-pull: the loco stays on the Aurora end, the cab car leads.
+          if (metra) {
+            // Push-pull: the loco stays on the Aurora (west, left) end and the
+            // cab car on the Chicago end. Outbound the loco leads; inbound the
+            // cab car leads and the loco pushes.
+            loco(x, top, locoL, h, true, left);
+            int cx = x + locoL + gap;
+            for (int c = 0; c < cars - 1; c++, cx += carL + gap) car(cx, top, carL, h);
+            cab(cx, top, carL, h, false, !left);
+          } else if (left) {
             loco(x, top, locoL, h, true);
             int cx = x + locoL + gap;
             for (int c = 0; c < cars; c++, cx += carL + gap) car(cx, top, carL, h);
-            box(cx - gap - 3, top + h - 5, 2, 2, lamp);
+            box(cx - gap - 2, top + 2, 2, 2, tail);              // marker on the last car
           } else {
+            box(x, top + 2, 2, 2, tail);
             int cx = x;
             for (int c = 0; c < cars; c++, cx += carL + gap) car(cx, top, carL, h);
             loco(cx, top, locoL, h, false);
@@ -1397,7 +1477,8 @@ display:
           const int sh = 14, sL = sh * 29 / 10, step = sL + 2;
           clip0 = 0; clip1 = 64;
           track(41);
-          int off = (int) (el * 0.05f) % step;
+          // Same speed as the big train, at this smaller scale (14/24).
+          int off = (int) (el * (timed ? pxms * sh / h : 0.05f)) % step;
           for (int x = left ? -off : off - step; x < 64; x += step) car(x, 22, sL, sh);
           it.print(32, 50, id(f8), metra ? Color(40, 100, 230) : id(c_red), TextAlign::TOP_CENTER,
                    id(tr_operator).c_str());
@@ -1409,8 +1490,13 @@ display:
         std::string dest = "TO " + id(tr_dest);
         for (auto &ch : dest) ch = toupper(ch);
         marquee(x0, xr, 31, id(f8), id(c_white), dest);
-        if ((millis() / 600) % 2 == 0)
+        const int64_t due = timed ? (id(tr_pass_ms) - now_ms + 999) / 1000 : 0;
+        if (due > 0) {
+          // Countdown to when the front passes the house.
+          it.printf(x0, 52, id(f8), id(c_red), TextAlign::TOP_LEFT, "IN %d:%02d", (int) (due / 60), (int) (due % 60));
+        } else if ((millis() / 600) % 2 == 0) {
           it.print(x0, 52, id(f8), id(c_red), TextAlign::TOP_LEFT, "PASSING");
+        }
         if (id(tr_late) > 1)
           it.printf(xr, 52, id(f8), id(c_red), TextAlign::TOP_RIGHT, "%d MIN LATE", id(tr_late));
         else
